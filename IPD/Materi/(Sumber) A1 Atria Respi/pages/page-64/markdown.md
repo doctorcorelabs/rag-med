@@ -1,0 +1,19 @@
+Atria.
+
+# Trakeitis Bakterial
+
+![img-24.jpeg](img-24.jpeg)
+
+Patogenesis
+
+INFEKSI VIRAL
+↓
+KERUSAKAN MUKOSA SALURAN NAPAS
+↓
+SUPERINFEKSI BAKTERI
+↓
+EDEMA + SEKRET PURULEN
+↓
+DEBRIS NEKROTIK
+↓
+OBSTRUKSI JALAN NAPAS

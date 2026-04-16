@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Medical RAG - Clinical Ethereal</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "on-tertiary": "#f5f9ff",
+                        "surface-variant": "#d9e4ea",
+                        "on-primary-fixed-variant": "#535b71",
+                        "secondary": "#005bc4",
+                        "on-tertiary-fixed": "#00121e",
+                        "primary-container": "#dae2fd",
+                        "surface": "#f7f9fb",
+                        "on-secondary-container": "#004eaa",
+                        "on-primary": "#f7f7ff",
+                        "on-error-container": "#752121",
+                        "primary-dim": "#4a5268",
+                        "error-dim": "#4e0309",
+                        "error-container": "#fe8983",
+                        "on-tertiary-fixed-variant": "#003954",
+                        "secondary-dim": "#004fad",
+                        "surface-tint": "#565e74",
+                        "outline": "#717c82",
+                        "tertiary-fixed": "#34b5fa",
+                        "tertiary-dim": "#005980",
+                        "on-tertiary-container": "#003047",
+                        "surface-dim": "#cfdce3",
+                        "surface-bright": "#f7f9fb",
+                        "on-background": "#2a3439",
+                        "surface-container-low": "#f0f4f7",
+                        "background": "#f7f9fb",
+                        "on-secondary": "#f9f8ff",
+                        "on-secondary-fixed": "#003c86",
+                        "on-secondary-fixed-variant": "#0057bd",
+                        "surface-container-highest": "#d9e4ea",
+                        "inverse-primary": "#dae2fd",
+                        "inverse-surface": "#0b0f10",
+                        "inverse-on-surface": "#9a9d9f",
+                        "surface-container": "#e8eff3",
+                        "on-error": "#fff7f6",
+                        "tertiary": "#006592",
+                        "tertiary-fixed-dim": "#17a8ec",
+                        "surface-container-high": "#e1e9ee",
+                        "error": "#9f403d",
+                        "on-primary-fixed": "#373f54",
+                        "primary-fixed-dim": "#ccd4ee",
+                        "on-surface-variant": "#566166",
+                        "tertiary-container": "#34b5fa",
+                        "primary-fixed": "#dae2fd",
+                        "on-surface": "#2a3439",
+                        "secondary-fixed-dim": "#c3d4ff",
+                        "outline-variant": "#a9b4b9",
+                        "surface-container-lowest": "#ffffff",
+                        "primary": "#565e74",
+                        "on-primary-container": "#4a5167",
+                        "secondary-fixed": "#d8e2ff",
+                        "secondary-container": "#d8e2ff"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "1rem",
+                        "lg": "2rem",
+                        "xl": "3rem",
+                        "full": "9999px"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope", "sans-serif"],
+                        "body": ["Inter", "sans-serif"],
+                        "label": ["Inter", "sans-serif"]
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: theme('colors.background');
+            color: theme('colors.on-surface');
+            font-family: theme('fontFamily.body');
+        }
+        h1, h2, h3, h4, h5, h6 {
+            font-family: theme('fontFamily.headline');
+        }
+        
+        /* Glassmorphism utilities */
+        .glass-panel {
+            background-color: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(24px) saturate(120%);
+            -webkit-backdrop-filter: blur(24px) saturate(120%);
+        }
+        
+        .glass-border {
+            border: 1px solid rgba(169, 180, 185, 0.15); /* Ghost Border */
+        }
+        
+        .ambient-shadow {
+            box-shadow: 0 40px 60px -10px rgba(42, 52, 57, 0.04);
+        }
+
+        .gradient-btn {
+            background: linear-gradient(135deg, theme('colors.secondary'), theme('colors.tertiary'));
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+    </style>
+</head>
+<body class="h-screen w-full overflow-hidden flex bg-background">
+    <!-- SideNavBar (From JSON) -->
+    <nav id="sidebar" class="fixed left-0 top-0 h-full z-40 flex flex-col p-4 bg-slate-50/40 dark:bg-slate-950/40 backdrop-blur-2xl h-screen w-72 rounded-r-3xl tonal-layering no-border shadow-[40px_0_60px_-10px_rgba(0,0,0,0.04)] transition-transform duration-300 ease-in-out font-['Inter'] text-sm hidden md:flex">
+        <!-- Brand/Header -->
+        <div class="flex items-center gap-3 mb-10 px-4 mt-4 overflow-hidden">
+            <div class="h-10 w-10 rounded-full bg-primary-container flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-secondary" data-icon="medical_services">medical_services</span>
+            </div>
+            <div class="sidebar-label transition-all duration-300">
+                <h2 class="text-lg font-black text-slate-800 dark:text-slate-200 whitespace-nowrap">Clinical Assistant</h2>
+                <p class="text-xs text-on-surface-variant font-label whitespace-nowrap">AI-Powered Insights</p>
+            </div>
+        </div>
+        
+        <!-- CTA -->
+        <button id="new-consultation-btn" class="gradient-btn w-full rounded-full py-3 px-6 text-white font-medium mb-8 flex items-center justify-center gap-2 hover:opacity-90 transition-opacity overflow-hidden group">
+            <span class="material-symbols-outlined text-[20px] shrink-0" data-icon="add">add</span>
+            <span class="sidebar-label whitespace-nowrap transition-all duration-300">New Consultation</span>
+        </button>
+        
+        <!-- Main Nav Tabs -->
+        <div class="flex-1 flex flex-col gap-2 overflow-y-auto pr-2">
+            <a href="#" class="flex items-center gap-3 px-4 py-3 bg-indigo-50/50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-xl transition-all group">
+                <span class="material-symbols-outlined" data-icon="chat_bubble">chat_bubble</span>
+                <span class="sidebar-label font-medium whitespace-nowrap overflow-hidden transition-all duration-300">Recent Chats</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-4 py-3 text-slate-600 dark:text-slate-400 hover:text-indigo-500 hover:bg-white/20 dark:hover:bg-slate-800/20 rounded-xl transition-all group">
+                <span class="material-symbols-outlined" data-icon="book">book</span>
+                <span class="sidebar-label font-medium whitespace-nowrap overflow-hidden transition-all duration-300">Medical Library</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-4 py-3 text-slate-600 dark:text-slate-400 hover:text-indigo-500 hover:bg-white/20 dark:hover:bg-slate-800/20 rounded-xl transition-all group">
+                <span class="material-symbols-outlined" data-icon="folder_shared">folder_shared</span>
+                <span class="sidebar-label font-medium whitespace-nowrap overflow-hidden transition-all duration-300">Patient Records</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-4 py-3 text-slate-600 dark:text-slate-400 hover:text-indigo-500 hover:bg-white/20 dark:hover:bg-slate-800/20 rounded-xl transition-all group">
+                <span class="material-symbols-outlined" data-icon="query_stats">query_stats</span>
+                <span class="sidebar-label font-medium whitespace-nowrap overflow-hidden transition-all duration-300">Analytics</span>
+            </a>
+        </div>
+        
+        <!-- Footer Tabs -->
+        <div class="mt-auto pt-4 border-t border-slate-200/50 flex flex-col gap-1">
+            <a href="#" class="flex items-center gap-3 px-4 py-2 text-slate-600 dark:text-slate-400 hover:text-indigo-500 rounded-xl transition-all group">
+                <span class="material-symbols-outlined text-[20px]" data-icon="shield">shield</span>
+                <span class="sidebar-label whitespace-nowrap overflow-hidden transition-all duration-300">Privacy</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-4 py-2 text-slate-600 dark:text-slate-400 hover:text-indigo-500 rounded-xl transition-all group">
+                <span class="material-symbols-outlined text-[20px]" data-icon="contact_support">contact_support</span>
+                <span class="sidebar-label whitespace-nowrap overflow-hidden transition-all duration-300">Support</span>
+            </a>
+        </div>
+    </nav>
+    
+    <!-- Main Content Area -->
+    <main id="main-content" class="flex-1 ml-0 md:ml-72 flex flex-col h-full relative transition-all duration-300">
+        <!-- TopAppBar -->
+        <header class="flex justify-between items-center px-8 h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl font-['Manrope'] tracking-tighter flat no shadows tonal shift bg-slate-100/20 dark:bg-slate-800/20">
+            <div class="flex items-center gap-4">
+                <button id="mobile-menu-btn" class="md:hidden p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
+                    <span class="material-symbols-outlined" data-icon="menu">menu</span>
+                </button>
+                <button id="collapse-btn" class="hidden md:flex p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
+                    <span id="collapse-icon" class="material-symbols-outlined">menu_open</span>
+                </button>
+                <h1 class="text-2xl font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">Medical RAG</h1>
+            </div>
+            <div class="flex items-center gap-4">
+                <button id="clear-chat-btn" class="flex items-center gap-2 px-4 py-2 bg-surface-container-lowest glass-border rounded-full text-secondary hover:bg-surface-container-high transition-colors font-medium text-sm">
+                    <span class="material-symbols-outlined text-[18px]" data-icon="delete">delete</span>
+                    Bersihkan Chat
+                </button>
+                <button class="p-2 text-slate-500 dark:text-slate-400 hover:bg-white/40 dark:hover:bg-slate-800/40 transition-all rounded-full scale-95 active:duration-150">
+                <button id="settings-btn" class="p-2 text-slate-500 dark:text-slate-400 hover:bg-white/40 dark:hover:bg-slate-800/40 transition-all rounded-full scale-95 active:duration-150">
+                    <span class="material-symbols-outlined" data-icon="settings">settings</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Chat Canvas -->
+        <div id="chat-canvas" class="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-8 pb-32 flex flex-col gap-8">
+            <!-- Initial Welcome Message -->
+            <div class="flex flex-col items-start gap-2 w-full max-w-4xl mr-auto mt-6">
+                <div class="flex items-center gap-2 mb-1 px-2">
+                    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm text-white">
+                        <span class="material-symbols-outlined text-[18px]">medical_services</span>
+                    </div>
+                    <span class="text-xs font-label text-on-surface-variant uppercase tracking-wider">Clinical Assistant</span>
+                </div>
+                <div class="bg-surface-container-low/50 backdrop-blur-xl border border-white/40 p-6 md:p-8 rounded-[2.5rem] rounded-tl-sm shadow-[0_8px_32px_-12px_rgba(0,0,0,0.05)] w-full">
+                    <p class="text-on-surface font-body text-base leading-relaxed">
+                        Halo! Saya asisten klinis Anda. Bagaimana saya bisa membantu Anda hari ini?
+                    </p>
+                </div>
+            </div>
+            <div class="h-10"></div>
+        </div>
+
+        <!-- Floating Input Area -->
+        <div class="absolute bottom-0 left-0 w-full p-4 md:p-8 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20">
+            <div class="w-full max-w-4xl pointer-events-auto">
+                <div class="bg-surface-container-lowest/80 backdrop-blur-2xl rounded-[2rem] glass-border p-2 flex items-end gap-2 ambient-shadow shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container transition-all">
+                    <button id="attach-btn" class="p-3 text-on-surface-variant hover:text-secondary hover:bg-secondary-container/50 rounded-full transition-colors shrink-0 mb-1">
+                        <span class="material-symbols-outlined" data-icon="attach_file">attach_file</span>
+                    </button>
+                    <div class="flex-1 relative">
+                        <textarea id="chat-input" rows="1" class="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-4 px-2 focus:ring-0 font-body text-base max-h-32 min-h-[56px] block" placeholder="Tanya seputar kondisi medis, gejala, atau referensi..."></textarea>
+                    </div>
+                    <button id="send-btn" class="p-3 mb-1 bg-primary-container text-on-primary-container hover:bg-secondary hover:text-white rounded-full transition-all shrink-0 flex items-center justify-center group shadow-sm">
+                        <span class="material-symbols-outlined group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" data-icon="send">send</span>
+                    </button>
+                </div>
+                <div class="text-center mt-3">
+                    <p class="text-[10px] md:text-xs text-on-surface-variant/70 font-label">
+                        Medical RAG can make mistakes. Consider verifying important clinical information.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('main-content');
+        const collapseBtn = document.getElementById('collapse-btn');
+        const collapseIcon = document.getElementById('collapse-icon');
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+
+        collapseBtn.addEventListener('click', () => {
+            const isCollapsed = sidebar.classList.toggle('w-20');
+            sidebar.classList.toggle('w-72');
+            
+            if (isCollapsed) {
+                mainContent.classList.replace('md:ml-72', 'md:ml-20');
+                collapseIcon.textContent = 'menu';
+                document.querySelectorAll('.sidebar-label').forEach(el => el.classList.add('opacity-0', 'pointer-events-none'));
+            } else {
+                mainContent.classList.replace('md:ml-20', 'md:ml-72');
+                collapseIcon.textContent = 'menu_open';
+                document.querySelectorAll('.sidebar-label').forEach(el => el.classList.remove('opacity-0', 'pointer-events-none'));
+            }
+        });
+
+        mobileMenuBtn.addEventListener('click', () => {
+            sidebar.classList.toggle('hidden');
+            sidebar.classList.toggle('flex');
+        });
+    </script>
+</body>
+</html>

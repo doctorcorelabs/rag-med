@@ -1,0 +1,125 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-on-tertiary: #f5f9ff;
+  --color-surface-variant: #d9e4ea;
+  --color-on-primary-fixed-variant: #535b71;
+  --color-secondary: #005bc4;
+  --color-on-tertiary-fixed: #00121e;
+  --color-primary-container: #dae2fd;
+  --color-surface: #f7f9fb;
+  --color-on-secondary-container: #004eaa;
+  --color-on-primary: #f7f7ff;
+  --color-on-error-container: #752121;
+  --color-primary-dim: #4a5268;
+  --color-error-dim: #4e0309;
+  --color-error-container: #fe8983;
+  --color-on-tertiary-fixed-variant: #003954;
+  --color-secondary-dim: #004fad;
+  --color-surface-tint: #565e74;
+  --color-outline: #717c82;
+  --color-tertiary-fixed: #34b5fa;
+  --color-tertiary-dim: #005980;
+  --color-on-tertiary-container: #003047;
+  --color-surface-dim: #cfdce3;
+  --color-surface-bright: #f7f9fb;
+  --color-on-background: #2a3439;
+  --color-surface-container-low: #f0f4f7;
+  --color-background: #f7f9fb;
+  --color-on-secondary: #f9f8ff;
+  --color-on-secondary-fixed: #003c86;
+  --color-on-secondary-fixed-variant: #0057bd;
+  --color-surface-container-highest: #d9e4ea;
+  --color-inverse-primary: #dae2fd;
+  --color-inverse-surface: #0b0f10;
+  --color-inverse-on-surface: #9a9d9f;
+  --color-surface-container: #e8eff3;
+  --color-on-error: #fff7f6;
+  --color-tertiary: #006592;
+  --color-tertiary-fixed-dim: #17a8ec;
+  --color-surface-container-high: #e1e9ee;
+  --color-error: #9f403d;
+  --color-on-primary-fixed: #373f54;
+  --color-primary-fixed-dim: #ccd4ee;
+  --color-on-surface-variant: #566166;
+  --color-tertiary-container: #34b5fa;
+  --color-primary-fixed: #dae2fd;
+  --color-on-surface: #2a3439;
+  --color-secondary-fixed-dim: #c3d4ff;
+  --color-outline-variant: #a9b4b9;
+  --color-surface-container-lowest: #ffffff;
+  --color-primary: #565e74;
+  --color-on-primary-container: #4a5167;
+  --color-secondary-fixed: #d8e2ff;
+  --color-secondary-container: #d8e2ff;
+
+  --font-headline: "Manrope", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-label: "Inter", sans-serif;
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-on-surface);
+  font-family: var(--font-body);
+  margin: 0;
+  overflow: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-headline);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.glass-panel {
+  background-color: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(24px) saturate(120%);
+  -webkit-backdrop-filter: blur(24px) saturate(120%);
+}
+
+.glass-border {
+  border: 1px solid rgba(169, 180, 185, 0.15);
+}
+
+.ambient-shadow {
+  box-shadow: 0 40px 60px -10px rgba(42, 52, 57, 0.04);
+}
+
+.gradient-btn {
+  background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* Rich Markdown Prose Styles (Ide 2) */
+.prose p { margin-bottom: 0.85rem; line-height: 1.75; }
+.prose ul, .prose ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+.prose li { margin-bottom: 0.4rem; line-height: 1.7; }
+.prose h1, .prose h2, .prose h3 { font-family: var(--font-headline); font-weight: 700; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+.prose strong { color: #4f46e5; }
+.prose code { font-family: 'Fira Code', ui-monospace, monospace; }
+.prose table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; border-radius: 0.75rem; overflow: hidden; }
+.prose th, .prose td { padding: 0.6rem 1rem; text-align: left; }
+.prose blockquote { border-left: 4px solid #a5b4fc; padding-left: 1rem; color: #64748b; font-style: italic; margin: 1rem 0; }
+.prose a { color: #4f46e5; text-decoration: underline; }
+
+/* Force Graph tooltip */
+.force-graph-tooltip {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  font-family: var(--font-body);
+  color: #1e293b;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+}
