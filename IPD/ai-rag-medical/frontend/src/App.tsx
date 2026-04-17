@@ -1691,20 +1691,26 @@ export default function App() {
 
   // Ide 11: Build chat_history from current messages for multi-turn
   const buildChatHistory = useCallback(() => {
-    const history: { role: string; content: string }[] = [];
-    for (const msg of messages) {
-      if (msg.role === 'user') {
-        history.push({ role: 'user', content: msg.content });
-      } else if (msg.role === 'bot' && msg.data) {
-        // Represent bot response as assistant message summary
-        const summary = `Analisis ${msg.data.draft_answer.disease}: ${msg.data.draft_answer.sections.map(s => s.title).join(', ')}`;
-        history.push({ role: 'assistant', content: summary });
+    try {
+      const history: { role: string; content: string }[] = [];
+      for (const msg of messages) {
+        if (msg.role === 'user') {
+          history.push({ role: 'user', content: msg.content || '' });
+        } else if (msg.role === 'bot' && msg.data?.draft_answer) {
+          const sections = msg.data.draft_answer.sections || [];
+          const summary = `Analisis ${msg.data.draft_answer.disease || 'Kondisi'}: ${sections.map(s => s.title).join(', ')}`;
+          history.push({ role: 'assistant', content: summary });
+        }
       }
+      return history.slice(-8); // Keep last 4 exchanges
+    } catch (e) {
+      console.error("Error building chat history:", e);
+      return [];
     }
-    return history.slice(-8); // Keep last 4 exchanges
   }, [messages]);
 
   const submitQuery = async () => {
+    console.log("submitQuery triggered with:", query, "isLoading:", isLoading, "API_URL:", API_URL);
     if (!query.trim() || isLoading) return;
 
     const nextQuery = query.trim();
@@ -1713,17 +1719,23 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const response = await axios.post<ApiResponse>(`${API_URL}/search_disease_context`, {
+      console.log("Sending POST to", `${API_URL}/search_disease_context`);
+      const payload = {
         disease_name: nextQuery,
         detail_level: 'detail',
         top_k: 8,
         include_images: true,
         chat_history: buildChatHistory(), // Ide 11: Multi-turn history
-      });
+      };
+      
+      const response = await axios.post<ApiResponse>(`${API_URL}/search_disease_context`, payload);
+      console.log("API Response:", response.data);
+      
       setMessages((prev) => [...prev, { role: 'bot', data: response.data }]);
-    } catch (error) {
-      console.error(error);
-      setMessages((prev) => [...prev, { role: 'bot', error: true, content: 'Terjadi kesalahan saat memproses data.' }]);
+    } catch (error: any) {
+      console.error("API Error in submitQuery:", error);
+      const errMsg = error?.response?.data?.error || error.message || 'Terjadi kesalahan saat memproses data.';
+      setMessages((prev) => [...prev, { role: 'bot', error: true, content: errMsg }]);
     } finally {
       setIsLoading(false);
     }
