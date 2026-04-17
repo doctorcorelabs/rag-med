@@ -5,6 +5,7 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  VITE_API_URL = "https://medrag-worker.daivanfebrijuansetiya.workers.dev"
 
 # Redirect all SPA routes to index.html
 [[redirects]]
