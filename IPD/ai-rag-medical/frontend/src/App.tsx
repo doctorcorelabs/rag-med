@@ -103,6 +103,15 @@ type LibraryPreviewResponse = {
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8010';
 
+const PLACEHOLDER_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150' fill='%23e2e8f0'%3E%3Crect width='150' height='150'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='12' fill='%2394a3b8'%3ENo Image%3C/text%3E%3C/svg%3E";
+
+function resolveImageUrl(url: string | undefined): string {
+  if (!url) return PLACEHOLDER_IMG;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) return `${API_URL}${url}`;
+  return `${API_URL}/${url}`;
+}
+
 type ActiveView = 'chat' | 'library' | 'kg' | 'analytics';
 
 // Section icon mapping
@@ -1342,18 +1351,18 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                     {detail.images.map((img, iIdx) => (
                       <a
                         key={iIdx}
-                        href={`${API_URL}${img.image_url}`}
+                        href={resolveImageUrl(img.image_url)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="shrink-0 border border-slate-100 dark:border-slate-800 rounded-2xl overflow-hidden w-48 shadow-sm hover:border-indigo-400 transition-colors snap-center"
                       >
                         <img
-                          src={`${API_URL}${img.image_url}`}
+                          src={resolveImageUrl(img.image_url)}
                           alt={img.heading}
                           className="w-full h-32 object-cover"
                           onError={(e) => {
                             e.currentTarget.onerror = null;
-                            e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                            e.currentTarget.src = PLACEHOLDER_IMG;
                           }}
                         />
                         <div className="p-2 bg-white/90 dark:bg-slate-900/90">
@@ -1551,12 +1560,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                       {visualSelected.map((img, idx) => (
                         <div key={`${img.image_url}-${idx}`} className="border border-slate-200 rounded-xl overflow-hidden relative">
                           <img
-                            src={`${API_URL}${img.image_url}`}
+                            src={resolveImageUrl(img.image_url)}
                             alt={img.heading}
                             className="w-full h-24 object-cover"
                             onError={(e) => {
                               e.currentTarget.onerror = null;
-                              e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                              e.currentTarget.src = PLACEHOLDER_IMG;
                             }}
                           />
                           <button
@@ -1598,12 +1607,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                             title={exists ? 'Sudah dipilih' : 'Tambah'}
                           >
                             <img
-                              src={`${API_URL}${img.image_url}`}
+                              src={resolveImageUrl(img.image_url)}
                               alt={img.heading}
                               className="w-full h-24 object-cover"
                               onError={(e) => {
                                 e.currentTarget.onerror = null;
-                                e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                                e.currentTarget.src = PLACEHOLDER_IMG;
                               }}
                             />
                             <div className="p-2 bg-white/90">
@@ -1710,7 +1719,6 @@ export default function App() {
   }, [messages]);
 
   const submitQuery = async () => {
-    console.log("submitQuery triggered with:", query, "isLoading:", isLoading, "API_URL:", API_URL);
     if (!query.trim() || isLoading) return;
 
     const nextQuery = query.trim();
@@ -1719,21 +1727,17 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      console.log("Sending POST to", `${API_URL}/search_disease_context`);
       const payload = {
         disease_name: nextQuery,
         detail_level: 'detail',
         top_k: 8,
         include_images: true,
-        chat_history: buildChatHistory(), // Ide 11: Multi-turn history
+        chat_history: buildChatHistory(),
       };
-      
+
       const response = await axios.post<ApiResponse>(`${API_URL}/search_disease_context`, payload);
-      console.log("API Response:", response.data);
-      
       setMessages((prev) => [...prev, { role: 'bot', data: response.data }]);
     } catch (error: any) {
-      console.error("API Error in submitQuery:", error);
       const errMsg = error?.response?.data?.error || error.message || 'Terjadi kesalahan saat memproses data.';
       setMessages((prev) => [...prev, { role: 'bot', error: true, content: errMsg }]);
     } finally {
@@ -2038,10 +2042,10 @@ export default function App() {
                                   <span className="material-symbols-outlined text-white opacity-0 group-hover:opacity-100 transition-opacity scale-125">zoom_in</span>
                                 </div>
                                 <img
-                                  src={`${API_URL}${img.image_url}`}
+                                  src={resolveImageUrl(img.image_url)}
                                   alt={img.heading}
                                   className="w-48 h-32 object-cover transition-transform duration-500 group-hover:scale-110"
-                                  onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = 'https://via.placeholder.com/150?text=Image+Not+Found'; }}
+                                  onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = PLACEHOLDER_IMG; }}
                                 />
                                 <div className="p-3 bg-white/90 dark:bg-slate-900/90 backdrop-blur-sm w-full absolute bottom-0 z-20">
                                   <p className="text-[11px] text-center font-medium truncate w-40 text-slate-700 dark:text-slate-300">{img.heading}</p>
@@ -2183,10 +2187,10 @@ export default function App() {
                 <span className="material-symbols-outlined text-[18px]">close</span> Tutup
               </button>
               <img
-                src={`${API_URL}${imageModal.image_url}`}
+                src={resolveImageUrl(imageModal.image_url)}
                 alt={imageModal.heading}
                 className="w-full h-auto max-h-[75vh] object-contain rounded-2xl shadow-2xl"
-                onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = 'https://via.placeholder.com/800?text=Image+Not+Found'; }}
+                onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = PLACEHOLDER_IMG; }}
               />
               <div className="bg-surface-container-lowest glass-border glass-panel p-5 mt-4 rounded-2xl text-center shadow-lg w-full max-w-xl">
                 <p className="font-headline text-lg font-bold text-secondary mb-1 truncate">{imageModal.heading}</p>
