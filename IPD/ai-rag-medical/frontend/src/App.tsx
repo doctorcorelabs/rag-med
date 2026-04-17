@@ -21,6 +21,9 @@ type ImageItem = {
   heading: string;
   image_url: string;
   image_abs_path?: string;
+  /** Worker / RAG — stable key when no local path */
+  image_ref?: string;
+  storage_url?: string;
 };
 
 // Ide 2: sections now use "markdown" string instead of "points" array
@@ -111,6 +114,26 @@ function resolveImageUrl(url: string | undefined): string {
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
   if (url.startsWith('/')) return `${API_URL}${url}`;
   return `${API_URL}/${url}`;
+}
+
+/** Stable identity for deduping / PATCH (local path, R2 ref, or display URL). */
+function imageItemStableKey(img: ImageItem): string {
+  const a = (img.image_abs_path || '').trim();
+  if (a) return `abs:${a}`;
+  const r = (img.image_ref || '').trim();
+  if (r) return `ref:${r}`;
+  const s = (img.storage_url || '').trim();
+  if (s) return `stor:${s}`;
+  return `url:${(img.image_url || '').trim()}`;
+}
+
+function imageItemHasStableRef(img: ImageItem): boolean {
+  return (
+    (img.image_abs_path || '').trim().length > 0 ||
+    (img.image_ref || '').trim().length > 0 ||
+    (img.storage_url || '').trim().length > 0 ||
+    (img.image_url || '').trim().length > 0
+  );
 }
 
 type ActiveView = 'chat' | 'library' | 'kg' | 'analytics';
@@ -844,9 +867,6 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [err, setErr] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [combineWithExisting, setCombineWithExisting] = useState(false);
-  const [combineMode, setCombineMode] = useState<'append' | 'replace'>('replace');
-  const [persistPreviewAfterRegenerate, setPersistPreviewAfterRegenerate] = useState(true);
   const [previewBase, setPreviewBase] = useState('');
   const [previewCandidate, setPreviewCandidate] = useState('');
   const [previewCombinedEdit, setPreviewCombinedEdit] = useState('');
@@ -871,7 +891,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       const r = await axios.get(`${API_URL}/library/stases/${staseSlug}/diseases`);
       setDiseases(r.data.diseases || []);
       setProgress(r.data.progress || { filled: 0, total: 0, percent: 0 });
-    } catch (e) {
+    } catch {
       setErr('Gagal memuat daftar penyakit. Pastikan API berjalan.');
     } finally {
       setLoadingList(false);
@@ -930,9 +950,9 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
     try {
       const r = await axios.post<LibraryPreviewResponse>(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/preview`, {
         extra_prompt: extraPrompt.trim() || null,
-        combine_with_existing: combineWithExisting,
-        combine_mode: combineMode,
-        persist: persistPreviewAfterRegenerate,
+        combine_with_existing: false,
+        combine_mode: 'replace' as const,
+        persist: false,
       });
       setPreviewBase(r.data.markdown_base || '');
       setPreviewCandidate(r.data.markdown_candidate || '');
@@ -1084,16 +1104,22 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
 
   const saveVisualRefs = async () => {
     if (!selectedId) return;
-    const usable = visualSelected.filter((img) => (img.image_abs_path || '').trim().length > 0);
-    if (usable.length !== visualSelected.length) {
-      setErr('Sebagian gambar tidak punya image_abs_path (tidak bisa disimpan). Coba regenerate atau pilih dari rekomendasi.');
+    const bad = visualSelected.filter((img) => !imageItemHasStableRef(img));
+    if (bad.length > 0) {
+      setErr(
+        'Sebagian gambar tidak punya referensi yang bisa disimpan (path lokal, image_ref, storage_url, atau URL gambar). Pilih ulang dari daftar atau rekomendasi.',
+      );
+      return;
     }
     setVisualBusy(true);
     setErr(null);
     try {
       await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/visual_refs`, {
-        images: usable.map((img) => ({
-          image_abs_path: img.image_abs_path,
+        images: visualSelected.map((img) => ({
+          image_abs_path: (img.image_abs_path || '').trim() || undefined,
+          image_ref: (img.image_ref || '').trim() || undefined,
+          storage_url: (img.storage_url || '').trim() || undefined,
+          image_url: (img.image_url || '').trim() || undefined,
           heading: img.heading || '',
           source_name: img.source_name || '',
           page_no: img.page_no || 0,
@@ -1312,41 +1338,6 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   placeholder="Contoh: tekankan diagnosis banding dan red flag..."
                   className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-transparent px-3 py-2 text-sm min-h-[72px]"
                 />
-                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={combineWithExisting}
-                      onChange={(e) => setCombineWithExisting(e.target.checked)}
-                      className="rounded border-slate-300"
-                    />
-                    Gabungkan dengan artikel saat ini
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <span className="text-slate-500">Mode:</span>
-                    <select
-                      value={combineMode}
-                      onChange={(e) => setCombineMode(e.target.value as 'append' | 'replace')}
-                      disabled={!combineWithExisting}
-                      className="rounded-lg border border-slate-200 dark:border-slate-600 bg-white/80 dark:bg-slate-900/80 px-2 py-1 text-xs"
-                    >
-                      <option value="replace">Ganti penuh (kandidat saja)</option>
-                      <option value="append">Tambah di bawah (lama + pembaruan)</option>
-                    </select>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={persistPreviewAfterRegenerate}
-                      onChange={(e) => setPersistPreviewAfterRegenerate(e.target.checked)}
-                      className="rounded border-slate-300"
-                    />
-                    Simpan otomatis ke artikel setelah pratinjau
-                  </label>
-                </div>
-                <p className="text-[11px] text-slate-500 leading-snug">
-                  Jika aktif, hasil gabungan kolom pratinjau disimpan ke server seperti tombol Terapkan; matikan jika hanya ingin melihat di modal tanpa menulis ke disk.
-                </p>
               </div>
 
               {detail.images && detail.images.length > 0 && (
@@ -1520,7 +1511,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
               </div>
             </div>
             <p className="text-[10px] text-slate-500 mt-2">
-              Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Jika Anda tidak memakai simpan otomatis saat pratinjau, perubahan di kolom kanan belum ke server sampai <strong className="font-medium">Terapkan</strong>.
+              Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Perubahan di kolom kanan disimpan ke server saat Anda menekan <strong className="font-medium">Terapkan ke artikel utama</strong>.
             </p>
             <div className="flex justify-end gap-2 mt-4 flex-wrap">
               <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setPreviewOpen(false)}>
@@ -1613,7 +1604,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   ) : (
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                       {visualSuggestions.map((img, idx) => {
-                        const exists = visualSelected.some((s) => (s.image_abs_path || '') === (img.image_abs_path || '') && (img.image_abs_path || '').trim() !== '');
+                        const exists = visualSelected.some((s) => imageItemStableKey(s) === imageItemStableKey(img));
                         return (
                           <button
                             key={`${img.image_url}-${idx}`}

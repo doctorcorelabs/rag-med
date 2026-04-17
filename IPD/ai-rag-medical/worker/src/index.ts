@@ -130,6 +130,41 @@ const MergeMarkdownSchema = z.object({
   markdown_candidate: z.string().min(1),
 });
 
+const LibraryVisualRefItemSchema = z.object({
+  image_abs_path: z.string().optional(),
+  image_ref: z.string().optional(),
+  storage_url: z.string().optional(),
+  image_url: z.string().optional(),
+  heading: z.string().default(""),
+  source_name: z.string().default(""),
+  page_no: z.number().default(0),
+});
+
+const LibraryUpdateVisualRefsSchema = z.object({
+  images: z.array(LibraryVisualRefItemSchema),
+});
+
+type LibraryVisualRefItemIn = z.infer<typeof LibraryVisualRefItemSchema>;
+
+/** At least one of path/ref/URL so non-local R2 images can be persisted (parity with FastAPI meta.images). */
+function normalizeLibraryVisualRefItem(img: LibraryVisualRefItemIn): Record<string, unknown> | null {
+  const a = (img.image_abs_path ?? "").trim();
+  const r = (img.image_ref ?? "").trim();
+  const s = (img.storage_url ?? "").trim();
+  const u = (img.image_url ?? "").trim();
+  if (!a && !r && !s && !u) return null;
+  const out: Record<string, unknown> = {
+    heading: img.heading ?? "",
+    source_name: img.source_name ?? "",
+    page_no: img.page_no ?? 0,
+  };
+  if (a) out.image_abs_path = a;
+  if (r) out.image_ref = r;
+  if (s) out.storage_url = s;
+  if (u) out.image_url = u;
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: parse + validate JSON body via Zod (replaces zValidator middleware)
 // Returns parsed data or sends 400 and returns null.
@@ -161,6 +196,14 @@ async function contentHash(text: string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** PostgREST/Supabase embeds one-to-one FK relations as a single object; one-to-many as an array. */
+function embeddedLibraryArticle(raw: unknown): Record<string, unknown> | undefined {
+  if (raw == null) return undefined;
+  if (Array.isArray(raw)) return raw[0] as Record<string, unknown> | undefined;
+  if (typeof raw === "object") return raw as Record<string, unknown>;
+  return undefined;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: persist library article (shared by generate + preview persist)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +223,7 @@ async function upsertLibraryArticleMarkdown(
   const isGrounded = (gen.draft_answer as Record<string, unknown>)["grounded"] !== false;
   const status = gen.evidence.length === 0 || !isGrounded ? "draft" : "published";
   const hash = await contentHash(markdownBody);
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
   const ver = ((prevMeta["version"] as number) ?? 0) + 1;
 
@@ -437,8 +480,8 @@ app.get("/library/stases", async (c) => {
     const diseases = (sr["disease_catalog"] as Array<Record<string, unknown>>) ?? [];
     const diseaseCount = diseases.length;
     const filledCount = diseases.filter((d) => {
-      const la = d["library_article"] as Array<Record<string, unknown>>;
-      const status = la?.[0]?.["status"] as string;
+      const la = embeddedLibraryArticle(d["library_article"]);
+      const status = la?.["status"] as string;
       return status === "draft" || status === "published";
     }).length;
     return {
@@ -493,7 +536,7 @@ app.get("/library/stases/:slug/diseases", async (c) => {
 
   const rows = (diseases ?? []).map((d: unknown) => {
     const dr = d as Record<string, unknown>;
-    const la = (dr["library_article"] as Array<Record<string, unknown>>)?.[0];
+    const la = embeddedLibraryArticle(dr["library_article"]);
     return {
       id: dr["id"],
       catalog_no: dr["catalog_no"],
@@ -526,7 +569,7 @@ app.get("/library/stases/:slug/diseases/:catalog_id", async (c) => {
   const bundle = await getBundleOrFail(c.env, slug, catalogId);
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const meta = (la?.["meta"] as Record<string, unknown>) ?? {};
   const images = ((meta["images"] as Array<Record<string, unknown>>) ?? []).map((img) => ({
     ...img,
@@ -563,7 +606,7 @@ app.post("/library/stases/:slug/diseases/:catalog_id/preview", async (c) => {
     slug,
   );
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const markdownBase = (la?.["content_markdown"] as string) ?? "";
   const mode =
     payload.combine_with_existing && payload.combine_mode === "append" ? "append" : "replace";
@@ -659,7 +702,7 @@ app.post("/library/stases/:slug/diseases/:catalog_id/refine", async (c) => {
   const bundle = await getBundleOrFail(c.env, slug, catalogId);
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const currentMd = (la?.["content_markdown"] as string) ?? "";
   if (!currentMd) return c.json({ error: "No article to refine; generate first." }, 400);
 
@@ -703,7 +746,7 @@ app.patch("/library/stases/:slug/diseases/:catalog_id/content", async (c) => {
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
   const hash = await contentHash(payload.markdown);
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
   const newMeta = {
     ...prevMeta,
@@ -724,6 +767,69 @@ app.patch("/library/stases/:slug/diseases/:catalog_id/content", async (c) => {
   );
 
   return c.json({ ok: true, meta: newMeta });
+});
+
+app.patch("/library/stases/:slug/diseases/:catalog_id/visual_refs", async (c) => {
+  const slug = c.req.param("slug");
+  const catalogId = parseInt(c.req.param("catalog_id"), 10);
+  const payload = await parseBody(c, LibraryUpdateVisualRefsSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const bundle = await getBundleOrFail(c.env, slug, catalogId);
+  if (!bundle) return c.json({ error: "Disease not found" }, 404);
+
+  const normalizedImages: Record<string, unknown>[] = [];
+  for (const it of payload.images) {
+    const n = normalizeLibraryVisualRefItem(it);
+    if (n === null) {
+      return c.json(
+        {
+          error:
+            "Each image entry must include at least one of: image_abs_path, image_ref, storage_url, image_url",
+        },
+        422,
+      );
+    }
+    normalizedImages.push(n);
+  }
+
+  const la = embeddedLibraryArticle(bundle["library_article"]);
+  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const newMeta = {
+    ...prevMeta,
+    images: normalizedImages,
+    last_operation: "update_visual_refs",
+    updated_at: new Date().toISOString(),
+  };
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status: (la?.["status"] as string) ?? "draft",
+      content_markdown: (la?.["content_markdown"] as string | null) ?? null,
+      meta: newMeta,
+      content_hash: (la?.["content_hash"] as string | null) ?? null,
+      mindmap: la?.["mindmap"] ?? null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
+
+  const imagesOut = normalizedImages.map((img) => ({
+    ...img,
+    image_url:
+      (img["storage_url"] as string | undefined) ??
+      (img["image_url"] as string | undefined) ??
+      "",
+  }));
+
+  return c.json({
+    ok: true,
+    images: imagesOut,
+    count: imagesOut.length,
+    meta: newMeta,
+  });
 });
 
 app.delete("/library/stases/:slug/diseases/:catalog_id/article", async (c) => {
@@ -755,7 +861,7 @@ app.get("/library/stases/:slug/diseases/:catalog_id/mindmap", async (c) => {
   const bundle = await getBundleOrFail(c.env, slug, catalogId);
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   if (la?.["mindmap"]) return c.json(la["mindmap"]);
 
   return c.json({
@@ -778,7 +884,7 @@ app.post("/library/stases/:slug/diseases/:catalog_id/mindmap/generate", async (c
   const bundle = await getBundleOrFail(c.env, slug, catalogId);
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const markdownContent = (la?.["content_markdown"] as string) ?? "";
   if (!markdownContent)
     return c.json(
@@ -811,7 +917,7 @@ app.patch("/library/stases/:slug/diseases/:catalog_id/mindmap", async (c) => {
   const bundle = await getBundleOrFail(c.env, slug, catalogId);
   if (!bundle) return c.json({ error: "Disease not found" }, 404);
 
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const la = embeddedLibraryArticle(bundle["library_article"]);
   const existing = (la?.["mindmap"] as Record<string, unknown>) ?? {};
   const newMindmap = {
     ...existing,
