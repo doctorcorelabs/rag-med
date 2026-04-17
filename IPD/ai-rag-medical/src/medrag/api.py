@@ -72,6 +72,7 @@ class LibraryGenerateRequest(BaseModel):
 class LibraryPreviewRequest(LibraryGenerateRequest):
     combine_with_existing: bool = False
     combine_mode: Literal["append", "replace"] = "replace"
+    persist: bool = False  # save markdown_combined to disk + SQLite (same draft/published rules as generate)
 
 
 class LibraryRefineRequest(BaseModel):
@@ -506,6 +507,61 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     else "Belum ada artikel lama; kandidat sama dengan generate baru. Belum disimpan."
                 )
 
+            if payload.persist:
+                status = "published"
+                if not evidence:
+                    status = "draft"
+                if isinstance(answer, dict) and answer.get("grounded") is False:
+                    status = "draft"
+                ad = library_mod.article_dir(slug, bundle["catalog_no"])
+                ad.mkdir(parents=True, exist_ok=True)
+                md_path = ad / "content.md"
+                meta_path = ad / "meta.json"
+                md_path.write_text(markdown_combined, encoding="utf-8")
+                meta: dict[str, Any] = {}
+                ver = 1
+                if meta_path.is_file():
+                    try:
+                        old = json.loads(meta_path.read_text(encoding="utf-8"))
+                        ver = int(old.get("version", 0)) + 1
+                        meta = old
+                    except Exception:
+                        ver = 1
+                meta.update({
+                    "version": ver,
+                    "disease_name": disease_name,
+                    "catalog_no": bundle["catalog_no"],
+                    "stase_slug": slug,
+                    "generated_at": library_mod._utc_now_iso(),
+                    "extra_prompt": payload.extra_prompt,
+                    "last_operation": "preview_persist",
+                    "images": [
+                        {
+                            "image_abs_path": img.get("image_abs_path", ""),
+                            "heading": img.get("heading", ""),
+                            "source_name": img.get("source_name", ""),
+                            "page_no": img.get("page_no", 0),
+                        }
+                        for img in images
+                    ],
+                })
+                hook = maybe_index_article_for_rag(md_path, meta)
+                meta.update({k: hook[k] for k in ("indexed_into_rag", "indexed_checksum", "content_checksum") if k in hook})
+                meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                ch = content_hash(markdown_combined)
+                update_library_article_row(
+                    conn,
+                    catalog_id,
+                    status,
+                    str(md_path),
+                    str(meta_path),
+                    ch,
+                )
+                conn.commit()
+                preview_note = preview_note.replace("Belum disimpan.", "Tersimpan ke artikel utama.").replace(
+                    "Belum disimpan", "Tersimpan ke artikel utama"
+                )
+
             return {
                 "ok": True,
                 "markdown_base": markdown_base,
@@ -516,6 +572,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 "evidence": evidence_with_urls,
                 "images": images,
                 "preview_note": preview_note,
+                "persisted": payload.persist,
             }
         finally:
             conn.close()

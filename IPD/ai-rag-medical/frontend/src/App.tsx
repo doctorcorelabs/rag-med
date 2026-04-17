@@ -99,6 +99,7 @@ type LibraryPreviewResponse = {
   markdown_combined: string;
   preview_note: string;
   evidence_count: number;
+  persisted?: boolean;
 };
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8010';
@@ -845,6 +846,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [previewLoading, setPreviewLoading] = useState(false);
   const [combineWithExisting, setCombineWithExisting] = useState(false);
   const [combineMode, setCombineMode] = useState<'append' | 'replace'>('replace');
+  const [persistPreviewAfterRegenerate, setPersistPreviewAfterRegenerate] = useState(true);
   const [previewBase, setPreviewBase] = useState('');
   const [previewCandidate, setPreviewCandidate] = useState('');
   const [previewCombinedEdit, setPreviewCombinedEdit] = useState('');
@@ -930,12 +932,15 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         extra_prompt: extraPrompt.trim() || null,
         combine_with_existing: combineWithExisting,
         combine_mode: combineMode,
+        persist: persistPreviewAfterRegenerate,
       });
       setPreviewBase(r.data.markdown_base || '');
       setPreviewCandidate(r.data.markdown_candidate || '');
       setPreviewCombinedEdit(r.data.markdown_combined || '');
       setPreviewNote(r.data.preview_note || '');
       setPreviewOpen(true);
+      await loadDiseases();
+      if (selectedId) await loadDetail(selectedId);
     } catch {
       setErr('Pratinjau regenerate gagal. Periksa API atau GITHUB_TOKEN.');
     } finally {
@@ -1329,7 +1334,19 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                       <option value="append">Tambah di bawah (lama + pembaruan)</option>
                     </select>
                   </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={persistPreviewAfterRegenerate}
+                      onChange={(e) => setPersistPreviewAfterRegenerate(e.target.checked)}
+                      className="rounded border-slate-300"
+                    />
+                    Simpan otomatis ke artikel setelah pratinjau
+                  </label>
                 </div>
+                <p className="text-[11px] text-slate-500 leading-snug">
+                  Jika aktif, hasil gabungan kolom pratinjau disimpan ke server seperti tombol Terapkan; matikan jika hanya ingin melihat di modal tanpa menulis ke disk.
+                </p>
               </div>
 
               {detail.images && detail.images.length > 0 && (
@@ -1503,7 +1520,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
               </div>
             </div>
             <p className="text-[10px] text-slate-500 mt-2">
-              Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Belum ada perubahan di disk sampai Anda menekan Terapkan.
+              Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Jika Anda tidak memakai simpan otomatis saat pratinjau, perubahan di kolom kanan belum ke server sampai <strong className="font-medium">Terapkan</strong>.
             </p>
             <div className="flex justify-end gap-2 mt-4 flex-wrap">
               <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setPreviewOpen(false)}>

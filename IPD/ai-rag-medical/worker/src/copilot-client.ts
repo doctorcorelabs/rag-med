@@ -64,6 +64,68 @@ ${item.content}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Copilot multimodal: /chat/completions rejects external http(s) image URLs
+// ("validating image item: external image URLs are not supported"). Inline data: only.
+// Mirrors Python _attach_images_to_content (base64), but Worker fetches public R2 URLs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_COPILOT_IMAGE_BYTES = 6 * 1024 * 1024;
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function fetchHttpImageAsDataUrl(httpUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(httpUrl);
+    if (!res.ok) return null;
+    const lenHdr = res.headers.get("content-length");
+    if (lenHdr && parseInt(lenHdr, 10) > MAX_COPILOT_IMAGE_BYTES) return null;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > MAX_COPILOT_IMAGE_BYTES) return null;
+    const rawCt = res.headers.get("content-type") ?? "image/jpeg";
+    const mime = rawCt.split(";")[0].trim().toLowerCase();
+    const safeMime = mime.startsWith("image/") ? mime : "image/jpeg";
+    const b64 = uint8ToBase64(new Uint8Array(buf));
+    return `data:${safeMime};base64,${b64}`;
+  } catch {
+    return null;
+  }
+}
+
+type CopilotContentPart = {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+};
+
+/** Returns plain string or OpenAI-style multimodal parts (text + data: image URLs only). */
+async function buildCopilotUserMessageContent(
+  textPrompt: string,
+  images: ImageRecord[] | undefined,
+): Promise<string | CopilotContentPart[]> {
+  if (!images?.length) return textPrompt;
+  const parts: CopilotContentPart[] = [{ type: "text", text: textPrompt }];
+  for (const img of images) {
+    const raw = (img.storage_url ?? img.image_url ?? img.image_abs_path ?? "").trim();
+    if (!raw) continue;
+    let dataUrl: string | null = null;
+    if (raw.startsWith("data:")) {
+      dataUrl = raw;
+    } else if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      dataUrl = await fetchHttpImageAsDataUrl(raw);
+    }
+    if (dataUrl) parts.push({ type: "image_url", image_url: { url: dataUrl } });
+  }
+  if (parts.length === 1) return textPrompt;
+  return parts;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Citation resolution: [E1] → (Source, Hal N)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -241,6 +303,30 @@ async function callCopilot(
     stream: false,
   };
 
+  const serialized = JSON.stringify(body);
+  const payloadBytes = new TextEncoder().encode(serialized).length;
+  // #region agent log
+  fetch("http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "446f67" },
+    body: JSON.stringify({
+      sessionId: "446f67",
+      hypothesisId: "H2",
+      location: "copilot-client.ts:callCopilot",
+      message: "copilot_request_meta",
+      data: {
+        model: body.model,
+        payload_bytes: payloadBytes,
+        message_count: messages.length,
+        has_multimodal_user: messages.some(
+          (m) => m.role === "user" && Array.isArray(m.content),
+        ),
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+
   const res = await fetch(COPILOT_CHAT_URL, {
     method: "POST",
     headers: {
@@ -252,10 +338,33 @@ async function callCopilot(
       "Openai-Organization": "github-copilot",
       "Openai-Intent": "conversation-panel",
     },
-    body: JSON.stringify(body),
+    body: serialized,
   });
 
-  if (!res.ok) throw new Error(`Copilot API error: ${res.status}`);
+  if (!res.ok) {
+    const errText = (await res.text()).slice(0, 2000);
+    // #region agent log
+    fetch("http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "446f67" },
+      body: JSON.stringify({
+        sessionId: "446f67",
+        hypothesisId: "H1-H5",
+        location: "copilot-client.ts:callCopilot",
+        message: "copilot_http_error",
+        data: {
+          status: res.status,
+          model: body.model,
+          payload_bytes: payloadBytes,
+          message_count: messages.length,
+          error_body_preview: errText,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+    throw new Error(`Copilot API error: ${res.status} — ${errText}`);
+  }
   const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
   return data.choices[0].message.content;
 }
@@ -366,20 +475,8 @@ async function singlePassSynthesis(
     }
   }
 
-  if (images && images.length > 0) {
-    const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      { type: "text", text: userPrompt },
-    ];
-    for (const img of images) {
-      const url = img.storage_url ?? img.image_abs_path ?? "";
-      if (url.startsWith("http")) {
-        userContent.push({ type: "image_url", image_url: { url } });
-      }
-    }
-    messages.push({ role: "user", content: userContent });
-  } else {
-    messages.push({ role: "user", content: userPrompt });
-  }
+  const userPayload = await buildCopilotUserMessageContent(userPrompt, images);
+  messages.push({ role: "user", content: userPayload });
 
   const raw = await callCopilot(copilotToken, messages);
   return parseJsonResponse(raw);
@@ -442,20 +539,8 @@ async function twoPassSynthesis(
       }
     }
   }
-  if (images && images.length > 0) {
-    const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      { type: "text", text: synthesisUser },
-    ];
-    for (const img of images) {
-      const url = img.storage_url ?? img.image_abs_path ?? "";
-      if (url.startsWith("http")) {
-        userContent.push({ type: "image_url", image_url: { url } });
-      }
-    }
-    pass2Messages.push({ role: "user", content: userContent });
-  } else {
-    pass2Messages.push({ role: "user", content: synthesisUser });
-  }
+  const pass2User = await buildCopilotUserMessageContent(synthesisUser, images);
+  pass2Messages.push({ role: "user", content: pass2User });
 
   const raw = await callCopilot(copilotToken, pass2Messages);
   return parseJsonResponse(raw);

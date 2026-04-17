@@ -72,8 +72,13 @@ const ImageRequestSchema = z.object({
   stase_slug: z.string().optional().default("ipd"),
 });
 
+// extra_prompt: frontend sends `null` when empty (parity with FastAPI Optional[str] = None).
+// Plain z.string().optional() rejects JSON null.
 const LibraryGenerateSchema = z.object({
-  extra_prompt: z.string().optional(),
+  extra_prompt: z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.string().optional(),
+  ),
   top_k: z.number().int().min(3).max(20).default(10),
   image_limit: z.number().int().min(1).max(10).default(5),
 });
@@ -81,6 +86,8 @@ const LibraryGenerateSchema = z.object({
 const LibraryPreviewSchema = LibraryGenerateSchema.extend({
   combine_with_existing: z.boolean().default(false),
   combine_mode: z.enum(["append", "replace"]).default("replace"),
+  /** When true, persist markdown_combined to library_article (same rules as generate for draft/published). */
+  persist: z.boolean().default(false),
 });
 
 const LibraryRefineSchema = z.object({
@@ -152,6 +159,55 @@ async function contentHash(text: string): Promise<string> {
   const enc = new TextEncoder();
   const buf = await crypto.subtle.digest("SHA-256", enc.encode(text));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: persist library article (shared by generate + preview persist)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ArticleGenResult = Awaited<ReturnType<typeof runArticleGenerationPipeline>>;
+
+async function upsertLibraryArticleMarkdown(
+  supabase: ReturnType<typeof getSupabase>,
+  catalogId: number,
+  slug: string,
+  bundle: Record<string, unknown>,
+  markdownBody: string,
+  gen: ArticleGenResult,
+  extraPrompt: string | undefined,
+  lastOperation: "generate" | "preview_persist",
+): Promise<{ status: string; newMeta: Record<string, unknown> }> {
+  const isGrounded = (gen.draft_answer as Record<string, unknown>)["grounded"] !== false;
+  const status = gen.evidence.length === 0 || !isGrounded ? "draft" : "published";
+  const hash = await contentHash(markdownBody);
+  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
+  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const ver = ((prevMeta["version"] as number) ?? 0) + 1;
+
+  const newMeta: Record<string, unknown> = {
+    version: ver,
+    disease_name: bundle["name"],
+    catalog_no: bundle["catalog_no"],
+    stase_slug: slug,
+    generated_at: new Date().toISOString(),
+    extra_prompt: extraPrompt ?? null,
+    last_operation: lastOperation,
+    images: gen.images,
+  };
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status,
+      content_markdown: markdownBody,
+      meta: newMeta,
+      content_hash: hash,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
+
+  return { status, newMeta };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,6 +569,30 @@ app.post("/library/stases/:slug/diseases/:catalog_id/preview", async (c) => {
     payload.combine_with_existing && payload.combine_mode === "append" ? "append" : "replace";
   const markdownCombined = combinePreviewMarkdown(markdownBase || null, gen.markdown_candidate, mode);
 
+  let previewNote: string;
+  if (mode === "replace") {
+    previewNote = "Kandidat baru saja (ganti penuh). Belum disimpan.";
+  } else if (markdownBase.trim()) {
+    previewNote = "Gabungan artikel lama + pembaruan. Belum disimpan.";
+  } else {
+    previewNote = "Belum ada artikel lama; kandidat sama dengan generate baru. Belum disimpan.";
+  }
+
+  if (payload.persist) {
+    const supabase = getSupabase(c.env);
+    await upsertLibraryArticleMarkdown(
+      supabase,
+      catalogId,
+      slug,
+      bundle,
+      markdownCombined,
+      gen,
+      payload.extra_prompt,
+      "preview_persist",
+    );
+    previewNote = previewNote.replace("Belum disimpan.", "Tersimpan ke artikel utama.");
+  }
+
   return c.json({
     ok: true,
     markdown_base: markdownBase,
@@ -522,10 +602,8 @@ app.post("/library/stases/:slug/diseases/:catalog_id/preview", async (c) => {
     evidence_count: gen.evidence.length,
     evidence: gen.evidence,
     images: gen.images,
-    preview_note:
-      mode === "append"
-        ? "Gabungan artikel lama + pembaruan. Belum disimpan."
-        : "Kandidat baru saja (ganti penuh). Belum disimpan.",
+    preview_note: previewNote,
+    persisted: payload.persist,
   });
 });
 
@@ -548,35 +626,15 @@ app.post("/library/stases/:slug/diseases/:catalog_id/generate", async (c) => {
     slug,
   );
 
-  const isGrounded = (gen.draft_answer as Record<string, unknown>)["grounded"] !== false;
-  const status = gen.evidence.length === 0 || !isGrounded ? "draft" : "published";
-  const hash = await contentHash(gen.markdown_candidate);
-
-  const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
-  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
-  const ver = ((prevMeta["version"] as number) ?? 0) + 1;
-
-  const newMeta = {
-    version: ver,
-    disease_name: bundle["name"],
-    catalog_no: bundle["catalog_no"],
-    stase_slug: slug,
-    generated_at: new Date().toISOString(),
-    extra_prompt: payload.extra_prompt ?? null,
-    last_operation: "generate",
-    images: gen.images,
-  };
-
-  await supabase.from("library_article").upsert(
-    {
-      catalog_id: catalogId,
-      status,
-      content_markdown: gen.markdown_candidate,
-      meta: newMeta,
-      content_hash: hash,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "catalog_id" },
+  const { status, newMeta } = await upsertLibraryArticleMarkdown(
+    supabase,
+    catalogId,
+    slug,
+    bundle,
+    gen.markdown_candidate,
+    gen,
+    payload.extra_prompt,
+    "generate",
   );
 
   return c.json({

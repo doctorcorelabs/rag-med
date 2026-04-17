@@ -14,6 +14,7 @@ import urllib.request
 import urllib.error
 import base64
 import mimetypes
+from pathlib import Path
 from typing import Any
 
 from .retriever import (
@@ -27,6 +28,29 @@ from .retriever import (
 
 COPILOT_TOKEN_URL = 'https://api.github.com/copilot_internal/v2/token'
 COPILOT_CHAT_URL = 'https://api.githubcopilot.com/chat/completions'
+
+# Debug session NDJSON (see workspace debug-446f67.log); do not log secrets/PII.
+_DEBUG_LOG_PATH = Path(__file__).resolve().parents[4] / "debug-446f67.log"
+
+
+def _agent_debug_log(hypothesis_id: str, message: str, data: dict[str, Any]) -> None:
+    import time
+    try:
+        line = json.dumps(
+            {
+                "sessionId": "446f67",
+                "hypothesisId": hypothesis_id,
+                "location": "copilot_client.py:_call_copilot",
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            },
+            ensure_ascii=False,
+        ) + "\n"
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 CLINICAL_ORDER: dict[str, int] = {
     "Definisi": 0, "Etiologi": 1, "Patogenesis": 2,
@@ -253,9 +277,41 @@ def _call_copilot(
         'Openai-Intent': 'conversation-panel',
     }, method='POST')
 
-    with urllib.request.urlopen(req) as response:
-        resp_data = json.loads(response.read().decode('utf-8'))
-        return resp_data['choices'][0]['message']['content']
+    # region agent log
+    _agent_debug_log(
+        "H2",
+        "copilot_request_meta",
+        {
+            "model": body["model"],
+            "payload_bytes": len(data),
+            "message_count": len(messages),
+            "has_multimodal_user": any(
+                isinstance(m.get("content"), list) for m in messages if m.get("role") == "user"
+            ),
+        },
+    )
+    # endregion
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            resp_data = json.loads(response.read().decode('utf-8'))
+            return resp_data['choices'][0]['message']['content']
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='replace')[:2000]
+        # region agent log
+        _agent_debug_log(
+            "H1-H5",
+            "copilot_http_error",
+            {
+                "status": e.code,
+                "model": body["model"],
+                "payload_bytes": len(data),
+                "message_count": len(messages),
+                "error_body_preview": err_body,
+            },
+        )
+        # endregion
+        raise Exception(f"Copilot API error: {e.code} — {err_body}") from e
 
 
 def _parse_json_response(raw_content: str) -> dict[str, Any]:

@@ -85,6 +85,8 @@ export interface LibraryGenerateRequest {
 export interface LibraryPreviewRequest extends LibraryGenerateRequest {
   combine_with_existing?: boolean;
   combine_mode?: "append" | "replace";
+  /** Persist combined preview to DB (markdown_combined). */
+  persist?: boolean;
 }
 
 export interface LibraryRefineRequest {
