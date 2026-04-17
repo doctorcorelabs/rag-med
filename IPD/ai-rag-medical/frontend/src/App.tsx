@@ -1111,23 +1111,81 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       );
       return;
     }
+    const body = {
+      images: visualSelected.map((img) => ({
+        image_abs_path: (img.image_abs_path || '').trim() || undefined,
+        image_ref: (img.image_ref || '').trim() || undefined,
+        storage_url: (img.storage_url || '').trim() || undefined,
+        image_url: (img.image_url || '').trim() || undefined,
+        heading: img.heading || '',
+        source_name: img.source_name || '',
+        page_no: img.page_no || 0,
+      })),
+    };
+    // #region agent log
+    fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
+      body: JSON.stringify({
+        sessionId: '446f67',
+        runId: 'pre-fix',
+        hypothesisId: 'H1',
+        location: 'App.tsx:saveVisualRefs:beforePatch',
+        message: 'saveVisualRefs attempt',
+        data: {
+          apiBase: API_URL,
+          selectedId,
+          staseSlug,
+          imagesLen: body.images.length,
+          firstItem: body.images[0] ?? null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     setVisualBusy(true);
     setErr(null);
     try {
-      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/visual_refs`, {
-        images: visualSelected.map((img) => ({
-          image_abs_path: (img.image_abs_path || '').trim() || undefined,
-          image_ref: (img.image_ref || '').trim() || undefined,
-          storage_url: (img.storage_url || '').trim() || undefined,
-          image_url: (img.image_url || '').trim() || undefined,
-          heading: img.heading || '',
-          source_name: img.source_name || '',
-          page_no: img.page_no || 0,
-        })),
-      });
+      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/visual_refs`, body);
+      // #region agent log
+      fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
+        body: JSON.stringify({
+          sessionId: '446f67',
+          runId: 'pre-fix',
+          hypothesisId: 'H1',
+          location: 'App.tsx:saveVisualRefs:afterPatch',
+          message: 'patch 2xx',
+          data: { selectedId },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       setVisualOpen(false);
       await loadDetail(selectedId);
-    } catch {
+    } catch (e) {
+      // #region agent log
+      fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
+        body: JSON.stringify({
+          sessionId: '446f67',
+          runId: 'pre-fix',
+          hypothesisId: 'H1-H5',
+          location: 'App.tsx:saveVisualRefs:catch',
+          message: 'patch failed',
+          data: {
+            isAxios: axios.isAxiosError(e),
+            status: axios.isAxiosError(e) ? e.response?.status : undefined,
+            respData: axios.isAxiosError(e) ? e.response?.data : undefined,
+            code: axios.isAxiosError(e) ? e.code : undefined,
+            msg: String((e as Error)?.message ?? e),
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       setErr('Gagal menyimpan referensi visual.');
     } finally {
       setVisualBusy(false);
