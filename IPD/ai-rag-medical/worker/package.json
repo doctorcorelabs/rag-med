@@ -1,0 +1,21 @@
+{
+  "name": "medrag-worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.6",
+    "@supabase/supabase-js": "^2.43.4",
+    "hono": "^4.4.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240610.0",
+    "typescript": "^5.4.5",
+    "wrangler": "^3.60.0"
+  }
+}

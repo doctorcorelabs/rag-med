@@ -1,0 +1,299 @@
+// Medical Vocabulary — TypeScript translation of retriever.py constants
+// These are used purely in-memory in the Cloudflare Worker (no Python runtime needed)
+
+export const MEDICAL_SYNONYMS: Record<string, string[]> = {
+  // Pulmo
+  tbc: ["tuberkulosis", "tb", "tuberculosis", "kp", "koch pulmonum"],
+  tuberkulosis: ["tbc", "tb", "tuberculosis"],
+  ppok: ["copd", "penyakit paru obstruktif kronis", "bronkitis kronis", "emfisema"],
+  copd: ["ppok", "penyakit paru obstruktif kronis"],
+  asma: ["asthma", "bengek", "mengi"],
+  pneumonia: ["paru-paru basah", "bronkopneumonia", "cap", "hap", "vap"],
+  ards: ["acute respiratory distress syndrome", "gagal napas akut"],
+  // Cardio
+  acs: ["sindrom koroner akut", "ska", "serangan jantung", "stemi", "nstemi", "infark miokard"],
+  stemi: ["infark miokard", "acs", "ska", "serangan jantung"],
+  nstemi: ["infark miokard", "acs", "ska", "serangan jantung"],
+  hfpef: ["gagal jantung", "heart failure", "chf"],
+  hfrgef: ["gagal jantung", "heart failure", "chf"],
+  chf: ["gagal jantung", "congestive heart failure", "hfpef", "hfref"],
+  hipertensi: ["ht", "darah tinggi", "hypertension", "htn"],
+  cad: ["penyakit jantung koroner", "pjk", "coronary artery disease"],
+  // Gastro/Hepa
+  gerd: ["asam lambung", "refluks", "gastroesophageal reflux disease"],
+  sirosis: ["cirrhosis", "pengerasan hati"],
+  // Endo
+  dm: ["diabetes", "diabetes melitus", "kencing manis", "hiperglikemia"],
+  diabetes: ["dm", "kencing manis", "diabetes melitus"],
+  // Infeksi
+  dbd: ["dengue", "dengue hemorrhagic fever", "dhf", "demam berdarah"],
+  hiv: ["aids", "odhav", "odha", "human immunodeficiency virus"],
+  aids: ["hiv", "odha"],
+  // Klinis umum
+  patofisiologi: ["patogenesis", "fisiologi", "mekanisme"],
+  patogenesis: ["patofisiologi", "fisiologi", "mekanisme"],
+  etiologi: ["penyebab", "kausa"],
+  manifestasi: ["gejala", "keluhan", "simptom"],
+  gejala: ["manifestasi", "keluhan", "simptom"],
+  tatalaksana: ["terapi", "pengobatan", "penanganan", "manajemen"],
+  terapi: ["tatalaksana", "pengobatan", "penanganan"],
+  pengobatan: ["tatalaksana", "terapi", "penanganan"],
+  diagnosis: ["diagnosa", "diagnostik"],
+  diagnosa: ["diagnosis", "diagnostik"],
+  komplikasi: ["penyulit"],
+  prognosis: ["luaran", "outcome"],
+  definisi: ["pengertian", "arti"],
+  anamnesis: ["anamnesa", "keluhan", "riwayat"],
+  penunjang: ["laboratorium", "lab", "radiologi"],
+  farmakologi: ["obat", "medikasi"],
+  obat: ["farmakologi", "medikasi", "dosis"],
+};
+
+export const TYPO_CORRECTIONS: Record<string, string> = {
+  patofisilogi: "patofisiologi",
+  patofisiolgi: "patofisiologi",
+  patofsiologi: "patofisiologi",
+  patofisiogi: "patofisiologi",
+  tuberkulosisi: "tuberkulosis",
+  tuberkulosi: "tuberkulosis",
+  tuberkolusis: "tuberkulosis",
+  tuberkuosis: "tuberkulosis",
+  manitestasi: "manifestasi",
+  manfestasi: "manifestasi",
+  tatalaksna: "tatalaksana",
+  tatlaksana: "tatalaksana",
+  diagnoss: "diagnosis",
+  diagnossis: "diagnosis",
+  komplikassi: "komplikasi",
+  progosis: "prognosis",
+  prognsis: "prognosis",
+  anamesis: "anamnesis",
+  ananmesis: "anamnesis",
+  anamnesa: "anamnesis",
+  penunujang: "penunjang",
+  diabtes: "diabetes",
+  diabetis: "diabetes",
+  hipertensu: "hipertensi",
+  hipertensei: "hipertensi",
+  pnemonia: "pneumonia",
+  pnuemonia: "pneumonia",
+  pneumoni: "pneumonia",
+};
+
+export const INTENT_MAP: Record<string, string> = {
+  obat: "Tatalaksana",
+  terapi: "Tatalaksana",
+  pengobatan: "Tatalaksana",
+  dosis: "Tatalaksana",
+  tatalaksana: "Tatalaksana",
+  penanganan: "Tatalaksana",
+  regimen: "Tatalaksana",
+  farmakologi: "Tatalaksana",
+  gejala: "Manifestasi_Klinis",
+  keluhan: "Manifestasi_Klinis",
+  manifestasi: "Manifestasi_Klinis",
+  simptom: "Manifestasi_Klinis",
+  diagnosis: "Diagnosis",
+  diagnosa: "Diagnosis",
+  pemeriksaan: "Diagnosis",
+  penunjang: "Diagnosis",
+  diagnostik: "Diagnosis",
+  kriteria: "Diagnosis",
+  etiologi: "Etiologi",
+  penyebab: "Etiologi",
+  kausa: "Etiologi",
+  "faktor risiko": "Etiologi",
+  patofisiologi: "Patogenesis",
+  patogenesis: "Patogenesis",
+  fisiologi: "Patogenesis",
+  mekanisme: "Patogenesis",
+  patofisilogi: "Patogenesis",
+  komplikasi: "Komplikasi",
+  prognosis: "Prognosis",
+  definisi: "Definisi",
+  pengertian: "Definisi",
+  anamnesis: "Anamnesis",
+  anamnesa: "Anamnesis",
+  "pemeriksaan fisik": "Pemeriksaan_Fisik",
+};
+
+export const DISEASE_KEYWORDS: string[] = [
+  "tuberkulosis", "tbc", "tb", "pneumonia", "asma", "copd", "ppok",
+  "bronkitis", "bronkiolitis", "bronkiektasis", "emboli", "abses",
+  "efusi pleura", "pneumotoraks", "atelektasis", "fibrosis",
+  "kanker paru", "mesotelioma", "sarkoidosis", "hemoptisis",
+  "gagal napas", "ards", "edema paru", "cor pulmonale",
+  "laringitis", "trakeitis", "epiglotitis", "croup",
+  "hyaline membrane disease", "hmd", "rds",
+  "diabetes", "hipertensi", "gagal jantung", "chf", "acs", "stemi", "nstemi",
+  "anemia", "hiv", "aids", "meningitis", "hepatitis",
+  "sirosis", "gerd", "dispepsia", "gagal ginjal", "ckd", "aki",
+  "lupus", "rheumatoid", "stroke", "infark miokard", "aritmia",
+  "demam tifoid", "malaria", "dengue", "dbd", "leptospirosis",
+  "sindrom koroner akut", "ska", "penyakit jantung koroner", "pjk",
+];
+
+export const CLINICAL_ORDER: Record<string, number> = {
+  Definisi: 0,
+  Etiologi: 1,
+  Patogenesis: 2,
+  Anamnesis: 3,
+  Manifestasi_Klinis: 4,
+  Pemeriksaan_Fisik: 5,
+  Diagnosis: 6,
+  Tatalaksana: 7,
+  Komplikasi: 8,
+  Prognosis: 9,
+  Ringkasan_Klinis: 10,
+};
+
+// ── Query Processing Functions ────────────────────────────────────────────────
+
+const TOKEN_RE = /[a-zA-Z][a-zA-Z0-9/-]{1,}/g;
+
+export function correctTypo(token: string): string {
+  return TYPO_CORRECTIONS[token.toLowerCase()] ?? token;
+}
+
+export function expandSynonyms(tokens: string[]): string[] {
+  const expanded = [...tokens];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    const synonyms = MEDICAL_SYNONYMS[lower];
+    if (synonyms) {
+      for (const syn of synonyms) {
+        if (!expanded.some((t) => t.toLowerCase() === syn.toLowerCase())) {
+          expanded.push(syn);
+        }
+      }
+    }
+  }
+  return expanded;
+}
+
+export function extractDiseaseName(query: string): string | null {
+  const qLower = query.toLowerCase();
+  for (const disease of DISEASE_KEYWORDS) {
+    if (qLower.includes(disease)) return disease;
+  }
+  const tokens = query.match(TOKEN_RE) ?? [];
+  for (const token of tokens) {
+    const corrected = correctTypo(token);
+    if (MEDICAL_SYNONYMS[corrected]) {
+      for (const syn of MEDICAL_SYNONYMS[corrected]) {
+        if (DISEASE_KEYWORDS.includes(syn)) return syn;
+      }
+    }
+  }
+  return null;
+}
+
+export function extractTopicIntent(query: string): string | null {
+  const qLower = query.toLowerCase();
+  // Check multi-word intents first (longer first)
+  const sortedKeys = Object.keys(INTENT_MAP).sort((a, b) => b.length - a.length);
+  for (const keyword of sortedKeys) {
+    if (qLower.includes(keyword)) return INTENT_MAP[keyword];
+  }
+  // Single token check with typo correction
+  const tokens = query.match(TOKEN_RE) ?? [];
+  for (const token of tokens) {
+    const corrected = correctTypo(token);
+    if (INTENT_MAP[corrected]) return INTENT_MAP[corrected];
+  }
+  return null;
+}
+
+export function isDetailRequest(query: string): boolean {
+  const detail_keywords = [
+    "detail", "lengkap", "jelaskan", "jelasin", "menjelaskan",
+    "komprehensif", "selengkap", "keseluruhan", "semua aspek",
+    "secara detail", "secara lengkap", "apa itu", "jelaskan tentang",
+  ];
+  const qLower = query.toLowerCase();
+  return detail_keywords.some((kw) => qLower.includes(kw));
+}
+
+export function enrichQueryFromHistory(
+  query: string,
+  chatHistory: Array<{ role: string; content: string }> | undefined,
+): string {
+  if (!chatHistory || chatHistory.length === 0) return query;
+  const recentContext = chatHistory
+    .slice(-4)
+    .filter((t) => t.role === "user")
+    .map((t) => t.content)
+    .join(" ");
+  const currentDisease = extractDiseaseName(query);
+  if (!currentDisease) {
+    const historyDisease = extractDiseaseName(recentContext);
+    if (historyDisease) return `${historyDisease} ${query}`;
+  }
+  return query;
+}
+
+export function getExpandedTerms(query: string): string[] {
+  const tokens = (query.match(TOKEN_RE) ?? []).filter((t) => t.length > 2);
+  const corrected = tokens.map(correctTypo);
+  return expandSynonyms(corrected);
+}
+
+// Jaccard similarity for dedup
+export function jaccardSimilarity(a: string, b: string): number {
+  const setA = new Set(a.split(/\s+/));
+  const setB = new Set(b.split(/\s+/));
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const w of setA) {
+    if (setB.has(w)) intersection++;
+  }
+  const union = setA.size + setB.size - intersection;
+  return intersection / union;
+}
+
+export function pruneRedundantChunks<T extends { content: string }>(
+  results: T[],
+  threshold = 0.6,
+): T[] {
+  const pruned: T[] = [];
+  for (const item of results) {
+    const content = item.content.toLowerCase();
+    const isRedundant = pruned.some(
+      (s) => jaccardSimilarity(content, s.content.toLowerCase()) > threshold,
+    );
+    if (!isRedundant) pruned.push(item);
+  }
+  return pruned;
+}
+
+// RRF (Reciprocal Rank Fusion)
+function getChunkKey(item: Record<string, unknown>): string {
+  const content = String(item["content"] ?? "").slice(0, 200);
+  // Simple hash via string length + first chars (no crypto needed for key)
+  const hash = Array.from(content).reduce((acc, c) => (acc * 31 + c.charCodeAt(0)) & 0xffffffff, 0);
+  return `${item["source_name"]}|${item["page_no"]}|${item["heading"]}|${hash}`;
+}
+
+export function reciprocalRankFusion<T extends Record<string, unknown>>(
+  bm25: T[],
+  vector: T[],
+  k = 60,
+): T[] {
+  const scores = new Map<string, number>();
+  const data = new Map<string, T>();
+
+  for (let i = 0; i < bm25.length; i++) {
+    const key = getChunkKey(bm25[i]);
+    scores.set(key, (scores.get(key) ?? 0) + 1 / (k + i + 1));
+    data.set(key, bm25[i]);
+  }
+  for (let i = 0; i < vector.length; i++) {
+    const key = getChunkKey(vector[i]);
+    scores.set(key, (scores.get(key) ?? 0) + 1 / (k + i + 1));
+    if (!data.has(key)) data.set(key, vector[i]);
+  }
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([key]) => data.get(key)!);
+}
