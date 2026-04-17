@@ -6,8 +6,13 @@ compatibility_flags = ["nodejs_compat"]
 [ai]
 binding = "AI"
 
+[[r2_buckets]]
+binding = "MEDICAL_IMAGES"
+bucket_name = "coas-medical-images"
+
 [vars]
 CORS_ORIGIN = "*"
+R2_PUBLIC_BASE_URL = "https://pub-56e3e682628340078755345d5a0d6c05.r2.dev"
 
 # Secrets (set via: wrangler secret put SUPABASE_URL etc.)
 # SUPABASE_URL

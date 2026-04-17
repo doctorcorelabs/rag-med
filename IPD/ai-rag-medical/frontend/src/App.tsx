@@ -1691,6 +1691,7 @@ export default function App() {
   const [isSidebarMinimized, setIsSidebarMinimized] = useState(false);
   const [kgInitialDisease, setKgInitialDisease] = useState<string | null>(null); // auto-select in KG panel
   const [activeView, setActiveView] = useState<ActiveView>('chat');
+  const [activeStase, setActiveStase] = useState<string>('ipd');
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -1733,6 +1734,7 @@ export default function App() {
         top_k: 8,
         include_images: true,
         chat_history: buildChatHistory(),
+        stase_slug: activeStase,
       };
 
       const response = await axios.post<ApiResponse>(`${API_URL}/search_disease_context`, payload);
@@ -2107,6 +2109,28 @@ export default function App() {
         {/* Floating Input Area */}
         <div className="absolute bottom-0 left-0 w-full p-4 md:p-8 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20">
           <div className="w-full max-w-4xl pointer-events-auto">
+            {/* Stase selector */}
+            <div className="flex items-center gap-2 mb-2 px-1">
+              <span className="text-[11px] font-label text-on-surface-variant/70 uppercase tracking-wide shrink-0">Stase:</span>
+              {[
+                { slug: 'ipd', label: 'IPD' },
+                { slug: 'saraf', label: 'Saraf' },
+                { slug: 'anak', label: 'Anak' },
+                { slug: 'obgyn', label: 'ObGyn' },
+              ].map(({ slug, label }) => (
+                <button
+                  key={slug}
+                  onClick={() => setActiveStase(slug)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-all border ${
+                    activeStase === slug
+                      ? 'bg-primary text-white border-primary shadow-sm'
+                      : 'bg-surface-container text-on-surface-variant border-surface-variant hover:bg-secondary-container hover:text-secondary hover:border-secondary-container'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className={`bg-surface-container-lowest/80 backdrop-blur-2xl rounded-[2rem] glass-border p-2 flex items-end gap-2 ambient-shadow transition-all ${isLoading ? 'opacity-80' : 'shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container'}`}>
               <button disabled={isLoading} className="p-3 text-on-surface-variant hover:text-secondary hover:bg-secondary-container/50 rounded-full transition-colors shrink-0 mb-1">
                 <span className="material-symbols-outlined">attach_file</span>
@@ -2123,7 +2147,7 @@ export default function App() {
                   }}
                   disabled={isLoading}
                   className="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-4 px-2 focus:ring-0 font-body text-base max-h-32 min-h-[56px] block outline-none disabled:opacity-70"
-                  placeholder={isLoading ? 'Sedang memproses...' : 'Tanya seputar kondisi medis, gejala, atau tindak lanjut...'}
+                  placeholder={isLoading ? 'Sedang memproses...' : `Tanya seputar kondisi medis ${activeStase.toUpperCase()}, gejala, atau tindak lanjut...`}
                   rows={1}
                 />
               </div>

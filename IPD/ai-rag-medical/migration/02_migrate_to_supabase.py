@@ -87,10 +87,15 @@ def migrate_chunks(supabase, model):
     conn = sqlite3.connect(str(MEDRAG_DB))
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute("""
+        # stase_slug may not exist in older SQLite builds — check first
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()]
+        has_stase = "stase_slug" in columns
+        extra_col = ", stase_slug" if has_stase else ""
+
+        rows = conn.execute(f"""
             SELECT id, source_name, page_no, heading, content, disease_tags,
                    markdown_path, checksum, section_category, parent_heading,
-                   chunk_index, total_chunks, heading_level, content_type
+                   chunk_index, total_chunks, heading_level, content_type{extra_col}
             FROM chunks
         """).fetchall()
     finally:
@@ -139,6 +144,7 @@ def migrate_chunks(supabase, model):
                 "total_chunks": chunk.get("total_chunks", 1),
                 "heading_level": chunk.get("heading_level", 2),
                 "content_type": chunk.get("content_type", "prose"),
+                "stase_slug": chunk.get("stase_slug", "ipd"),
                 "embedding": emb,
             })
 
@@ -156,11 +162,22 @@ def migrate_images(supabase):
     conn = sqlite3.connect(str(MEDRAG_DB))
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute("""
-            SELECT source_name, page_no, alt_text, image_ref,
-                   image_abs_path, heading, nearby_text, markdown_path, checksum
-            FROM images
-        """).fetchall()
+        # Check whether stase_slug column exists in this SQLite (may be older build)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(images)").fetchall()]
+        has_stase = "stase_slug" in columns
+
+        if has_stase:
+            rows = conn.execute("""
+                SELECT source_name, page_no, alt_text, image_ref,
+                       image_abs_path, heading, nearby_text, markdown_path, checksum, stase_slug
+                FROM images
+            """).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT source_name, page_no, alt_text, image_ref,
+                       image_abs_path, heading, nearby_text, markdown_path, checksum
+                FROM images
+            """).fetchall()
     finally:
         conn.close()
 
@@ -187,11 +204,12 @@ def migrate_images(supabase):
             "alt_text": r["alt_text"] or "",
             "image_ref": r["image_ref"],
             "image_abs_path": r["image_abs_path"],
-            "storage_url": "",  # Will be populated after Supabase Storage upload
+            "storage_url": "",  # Populated by 05_upload_images_to_r2.py
             "heading": r["heading"],
             "nearby_text": r["nearby_text"],
             "markdown_path": r.get("markdown_path", ""),
             "checksum": r["checksum"],
+            "stase_slug": r.get("stase_slug", "ipd"),
         })
 
     # Insert in batches of 100

@@ -8,6 +8,7 @@ class SourcePage:
     source_name: str
     page_no: int
     markdown_path: Path
+    stase_slug: str = "ipd"
 
 
 @dataclass(slots=True)
@@ -25,6 +26,7 @@ class ChunkRecord:
     total_chunks: int = 1
     heading_level: int = 2
     content_type: str = "prose"
+    stase_slug: str = "ipd"
 
 
 @dataclass(slots=True)
@@ -38,6 +40,7 @@ class ImageRecord:
     nearby_text: str
     markdown_path: str
     checksum: str
+    stase_slug: str = "ipd"
 
 
 @dataclass

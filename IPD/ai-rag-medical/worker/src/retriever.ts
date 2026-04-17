@@ -32,6 +32,7 @@ async function vectorSearch(
   query: string,
   topK: number,
   filterSection?: string,
+  staseSlug?: string,
 ): Promise<ChunkRecord[]> {
   try {
     // Use Cloudflare Workers AI to generate embedding (replaces sentence-transformers)
@@ -48,6 +49,7 @@ async function vectorSearch(
       match_count: topK,
     };
     if (filterSection) params.filter_section = filterSection;
+    if (staseSlug) params.stase_slug = staseSlug;
 
     const { data, error } = await supabase.rpc("search_chunks_vector", params);
 
@@ -67,22 +69,27 @@ async function ftsSearch(
   supabase: SupabaseClient,
   query: string,
   topK: number,
+  staseSlug?: string,
 ): Promise<ChunkRecord[]> {
   const expandedTerms = getExpandedTerms(query);
 
-  const { data, error } = await supabase.rpc("search_chunks_fts", {
+  const params: Record<string, unknown> = {
     query_text: query,
     match_count: topK * 2,
     expanded_terms: expandedTerms.length > 0 ? expandedTerms : null,
-  });
+  };
+  if (staseSlug) params.stase_slug = staseSlug;
+
+  const { data, error } = await supabase.rpc("search_chunks_fts", params);
 
   if (error || !data) {
-    // Fallback: direct ILIKE
-    const { data: fallback } = await supabase
+    // Fallback: direct ILIKE (with optional stase filter)
+    let q = supabase
       .from("chunks")
       .select("id,source_name,page_no,heading,content,disease_tags,section_category,parent_heading,content_type,chunk_index")
-      .or(expandedTerms.slice(0, 5).map((t) => `content.ilike.%${t}%`).join(","))
-      .limit(topK);
+      .or(expandedTerms.slice(0, 5).map((t) => `content.ilike.%${t}%`).join(","));
+    if (staseSlug) q = q.eq("stase_slug", staseSlug);
+    const { data: fallback } = await q.limit(topK);
     return (fallback ?? []) as ChunkRecord[];
   }
 
@@ -152,6 +159,7 @@ export async function searchChunks(
   query: string,
   topK = 8,
   chatHistory?: Array<{ role: string; content: string }>,
+  staseSlug?: string,
 ): Promise<ChunkRecord[]> {
   const supabase = getSupabase(env);
   const enrichedQuery = enrichQueryFromHistory(query, chatHistory);
@@ -175,13 +183,13 @@ export async function searchChunks(
     queriesToRun = [enrichedQuery];
   }
 
-  // Execute all sub-queries in parallel
+  // Execute all sub-queries in parallel (with stase filter)
   const [bm25Results, vectorResults] = await Promise.all([
-    Promise.all(queriesToRun.map((q) => ftsSearch(supabase, q, effectiveTopK))).then((r) =>
+    Promise.all(queriesToRun.map((q) => ftsSearch(supabase, q, effectiveTopK, staseSlug))).then((r) =>
       r.flat(),
     ),
     Promise.all(
-      queriesToRun.map((q) => vectorSearch(supabase, env, q, effectiveTopK)),
+      queriesToRun.map((q) => vectorSearch(supabase, env, q, effectiveTopK, undefined, staseSlug)),
     ).then((r) => r.flat()),
   ]);
 
@@ -215,6 +223,7 @@ export async function relatedImages(
   query: string,
   evidence: ChunkRecord[],
   limit = 3,
+  staseSlug?: string,
 ): Promise<ImageRecord[]> {
   const supabase = getSupabase(env);
   const diseaseName = extractDiseaseName(query);
@@ -236,6 +245,10 @@ export async function relatedImages(
       ? ["alur", "diagnosis", "tatalaksana", "algoritma", "skema", "bagan"]
       : [];
 
+  const filters = searchTerms
+    .map((t) => `heading.ilike.%${t}%,alt_text.ilike.%${t}%,nearby_text.ilike.%${t}%`)
+    .join(",");
+
   // Phase 1: Evidence-co-located images
   let results: ImageRecord[] = [];
 
@@ -247,15 +260,13 @@ export async function relatedImages(
       }
     }
 
-    const filters = searchTerms
-      .map((t) => `heading.ilike.%${t}%,alt_text.ilike.%${t}%,nearby_text.ilike.%${t}%`)
-      .join(",");
-
-    const { data } = await supabase
+    let q = supabase
       .from("images")
       .select("source_name,page_no,heading,alt_text,image_ref,image_abs_path,storage_url,nearby_text")
-      .or(filters)
-      .limit(limit * 5);
+      .or(filters);
+    if (staseSlug) q = q.eq("stase_slug", staseSlug);
+
+    const { data } = await q.limit(limit * 5);
 
     if (data) {
       results = (data as ImageRecord[]).filter((img) =>
@@ -264,16 +275,14 @@ export async function relatedImages(
     }
   }
 
-  // Phase 2: Global fallback
+  // Phase 2: Global fallback (same stase filter)
   if (results.length === 0) {
-    const filters = searchTerms
-      .map((t) => `heading.ilike.%${t}%,alt_text.ilike.%${t}%,nearby_text.ilike.%${t}%`)
-      .join(",");
-    const { data } = await supabase
+    let q = supabase
       .from("images")
       .select("source_name,page_no,heading,alt_text,image_ref,image_abs_path,storage_url,nearby_text")
-      .or(filters)
-      .limit(limit * 5);
+      .or(filters);
+    if (staseSlug) q = q.eq("stase_slug", staseSlug);
+    const { data } = await q.limit(limit * 5);
     results = (data as ImageRecord[]) ?? [];
   }
 
@@ -290,14 +299,19 @@ export async function relatedImages(
     scoredMap.set(key, { score, img });
   }
 
+  // Resolve image URL: prefer R2 storage_url, fall back to abs path
+  const r2Base = env.R2_PUBLIC_BASE_URL ?? "";
+
   return [...scoredMap.values()]
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-    .map(({ img }) => ({
-      ...img,
-      // Use Supabase Storage URL if available, fall back to abs path
-      image_url: img.storage_url ?? img.image_abs_path ?? "",
-    }));
+    .map(({ img }) => {
+      let imageUrl = img.storage_url ?? "";
+      if (!imageUrl && r2Base && img.image_ref) {
+        imageUrl = `${r2Base}/${img.image_ref}`;
+      }
+      return { ...img, image_url: imageUrl };
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

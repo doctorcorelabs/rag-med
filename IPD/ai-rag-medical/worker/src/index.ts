@@ -63,11 +63,13 @@ const SearchDiseaseSchema = z.object({
   top_k: z.number().int().min(3).max(20).default(8),
   include_images: z.boolean().default(true),
   chat_history: z.array(ChatHistoryItemSchema).default([]),
+  stase_slug: z.string().optional().default("ipd"),
 });
 
 const ImageRequestSchema = z.object({
   disease_name: z.string().min(2),
   limit: z.number().int().min(1).max(10).default(3),
+  stase_slug: z.string().optional().default("ipd"),
 });
 
 const LibraryGenerateSchema = z.object({
@@ -201,6 +203,7 @@ async function runArticleGenerationPipeline(
   extraPrompt?: string,
   topK = 10,
   imageLimit = 5,
+  staseSlug = "ipd",
 ): Promise<{
   query: string;
   evidence: ChunkRecord[];
@@ -209,8 +212,8 @@ async function runArticleGenerationPipeline(
   markdown_candidate: string;
 }> {
   const query = extraPrompt ? `${diseaseName}. ${extraPrompt}` : diseaseName;
-  const evidence = await searchChunks(env, query, topK);
-  const rawImages = await relatedImages(env, query, evidence, imageLimit);
+  const evidence = await searchChunks(env, query, topK, undefined, staseSlug);
+  const rawImages = await relatedImages(env, query, evidence, imageLimit, staseSlug);
   const images: Record<string, unknown>[] = rawImages.map((img) => ({
     source_name: img.source_name,
     page_no: img.page_no,
@@ -275,6 +278,7 @@ app.post("/search_disease_context", async (c) => {
   if (!payload) return c.json({ error: "Invalid request body" }, 422);
 
   const history = payload.chat_history as Array<{ role: string; content: string }>;
+  const staseSlug = payload.stase_slug ?? "ipd";
 
   const detectedDisease = extractDiseaseName(payload.disease_name);
   const detectedIntent = extractTopicIntent(payload.disease_name);
@@ -285,11 +289,12 @@ app.post("/search_disease_context", async (c) => {
     payload.disease_name,
     payload.top_k,
     history.length > 0 ? history : undefined,
+    staseSlug,
   );
 
   let images: Record<string, unknown>[] = [];
   if (payload.include_images) {
-    const raw = await relatedImages(c.env, payload.disease_name, evidence, 3);
+    const raw = await relatedImages(c.env, payload.disease_name, evidence, 3, staseSlug);
     images = raw.map((img) => ({
       source_name: img.source_name,
       page_no: img.page_no,
@@ -335,7 +340,8 @@ app.post("/get_related_images", async (c) => {
   const payload = await parseBody(c, ImageRequestSchema);
   if (!payload) return c.json({ error: "Invalid request body" }, 422);
 
-  const images = await relatedImages(c.env, payload.disease_name, [], payload.limit);
+  const staseSlug = payload.stase_slug ?? "ipd";
+  const images = await relatedImages(c.env, payload.disease_name, [], payload.limit, staseSlug);
   return c.json({
     query: payload.disease_name,
     images: images.map((img) => ({
@@ -498,6 +504,7 @@ app.post("/library/stases/:slug/diseases/:catalog_id/preview", async (c) => {
     payload.extra_prompt,
     payload.top_k,
     payload.image_limit,
+    slug,
   );
 
   const la = (bundle["library_article"] as Array<Record<string, unknown>>)?.[0];
@@ -538,6 +545,7 @@ app.post("/library/stases/:slug/diseases/:catalog_id/generate", async (c) => {
     payload.extra_prompt,
     payload.top_k,
     payload.image_limit,
+    slug,
   );
 
   const isGrounded = (gen.draft_answer as Record<string, unknown>)["grounded"] !== false;

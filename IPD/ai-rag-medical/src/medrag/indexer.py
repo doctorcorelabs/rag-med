@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT, MATERI_GLOB, EMBEDDING_MODEL
+from .config import (
+    DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT,
+    MATERI_GLOB, MATERI_PAGE_GLOB, STASE_MATERI_ROOTS, EMBEDDING_MODEL,
+)
 from .models import ChunkRecord, ImageRecord, SourcePage
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
@@ -63,13 +66,35 @@ def _normalize_text(value: str) -> str:
 
 
 def discover_source_pages(workspace_root: Path) -> list[SourcePage]:
+    """Discover all markdown source pages across all configured stases."""
     pages: list[SourcePage] = []
-    for md_path in workspace_root.glob(MATERI_GLOB):
-        source_name = md_path.parents[2].name
-        page_dir = md_path.parent.name
-        page_no = int(page_dir.replace("page-", "")) if page_dir.startswith("page-") else -1
-        pages.append(SourcePage(source_name=source_name, page_no=page_no, markdown_path=md_path))
-    pages.sort(key=lambda item: (item.source_name, item.page_no))
+
+    for stase_slug, materi_dir in STASE_MATERI_ROOTS:
+        materi_root = workspace_root / materi_dir
+        if not materi_root.is_dir():
+            continue
+        for md_path in materi_root.glob(MATERI_PAGE_GLOB):
+            source_name = md_path.parents[2].name
+            page_dir = md_path.parent.name
+            page_no = int(page_dir.replace("page-", "")) if page_dir.startswith("page-") else -1
+            pages.append(
+                SourcePage(
+                    source_name=source_name,
+                    page_no=page_no,
+                    markdown_path=md_path,
+                    stase_slug=stase_slug,
+                )
+            )
+
+    # Fallback: if STASE_MATERI_ROOTS is empty, use legacy glob
+    if not pages:
+        for md_path in workspace_root.glob(MATERI_GLOB):
+            source_name = md_path.parents[2].name
+            page_dir = md_path.parent.name
+            page_no = int(page_dir.replace("page-", "")) if page_dir.startswith("page-") else -1
+            pages.append(SourcePage(source_name=source_name, page_no=page_no, markdown_path=md_path))
+
+    pages.sort(key=lambda item: (item.stase_slug, item.source_name, item.page_no))
     return pages
 
 
@@ -293,6 +318,7 @@ def parse_page(source_page: SourcePage) -> tuple[list[ChunkRecord], list[ImageRe
                     nearby_text=nearby,
                     markdown_path=str(source_page.markdown_path),
                     checksum=_checksum(checksum_seed),
+                    stase_slug=source_page.stase_slug,
                 )
             )
 
@@ -323,6 +349,7 @@ def parse_page(source_page: SourcePage) -> tuple[list[ChunkRecord], list[ImageRe
                     total_chunks=total_in_section,
                     heading_level=level,
                     content_type=content_type,
+                    stase_slug=source_page.stase_slug,
                 )
             )
 
@@ -342,6 +369,7 @@ def parse_page(source_page: SourcePage) -> tuple[list[ChunkRecord], list[ImageRe
                     nearby_text="",
                     markdown_path=str(source_page.markdown_path),
                     checksum=_checksum(checksum_seed),
+                    stase_slug=source_page.stase_slug,
                 )
             )
 
@@ -372,7 +400,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             chunk_index INTEGER NOT NULL DEFAULT 0,
             total_chunks INTEGER NOT NULL DEFAULT 1,
             heading_level INTEGER NOT NULL DEFAULT 2,
-            content_type TEXT NOT NULL DEFAULT 'prose'
+            content_type TEXT NOT NULL DEFAULT 'prose',
+            stase_slug TEXT NOT NULL DEFAULT 'ipd'
         );
 
         CREATE VIRTUAL TABLE chunks_fts USING fts5(
@@ -394,7 +423,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             heading TEXT NOT NULL,
             nearby_text TEXT NOT NULL,
             markdown_path TEXT NOT NULL,
-            checksum TEXT NOT NULL
+            checksum TEXT NOT NULL,
+            stase_slug TEXT NOT NULL DEFAULT 'ipd'
         );
 
         CREATE TABLE graph_edges (
@@ -404,7 +434,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             target_node TEXT NOT NULL,
             target_type TEXT NOT NULL,
             source_name TEXT NOT NULL,
-            page_no INTEGER NOT NULL
+            page_no INTEGER NOT NULL,
+            stase_slug TEXT NOT NULL DEFAULT 'ipd'
         );
         """
     )
@@ -414,8 +445,9 @@ def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images:
     conn.executemany(
         """
         INSERT INTO chunks (source_name, page_no, heading, content, disease_tags, markdown_path, checksum,
-                            section_category, parent_heading, chunk_index, total_chunks, heading_level, content_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            section_category, parent_heading, chunk_index, total_chunks, heading_level, content_type,
+                            stase_slug)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -432,6 +464,7 @@ def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images:
                 record.total_chunks,
                 record.heading_level,
                 record.content_type,
+                record.stase_slug,
             )
             for record in chunks
         ],
@@ -446,8 +479,9 @@ def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images:
 
     conn.executemany(
         """
-        INSERT INTO images (source_name, page_no, alt_text, image_ref, image_abs_path, heading, nearby_text, markdown_path, checksum)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO images (source_name, page_no, alt_text, image_ref, image_abs_path, heading, nearby_text,
+                            markdown_path, checksum, stase_slug)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -460,6 +494,7 @@ def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images:
                 record.nearby_text,
                 record.markdown_path,
                 record.checksum,
+                record.stase_slug,
             )
             for record in images
         ],
@@ -472,16 +507,18 @@ def _insert_graph_edges(conn: sqlite3.Connection, chunks: list[ChunkRecord]) -> 
     for chunk in chunks:
         disease_node = chunk.source_name
         category = chunk.section_category
-        # Extract key terms from heading as target nodes
         heading_words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9/ ]{2,}", chunk.heading)
         for term in heading_words[:3]:
             term = term.strip()
             if term and term.lower() != disease_node.lower():
-                edges.append((disease_node, category, term, "concept", chunk.source_name, chunk.page_no))
+                edges.append((
+                    disease_node, category, term, "concept",
+                    chunk.source_name, chunk.page_no, chunk.stase_slug,
+                ))
 
     if edges:
         conn.executemany(
-            "INSERT INTO graph_edges (source_disease, relation, target_node, target_type, source_name, page_no) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO graph_edges (source_disease, relation, target_node, target_type, source_name, page_no, stase_slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
             edges,
         )
 

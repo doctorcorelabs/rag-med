@@ -9,8 +9,12 @@ export interface Env {
   GITHUB_TOKEN: string;
   // Cloudflare Workers AI binding
   AI: Ai;
+  // Cloudflare R2 — medical images bucket
+  MEDICAL_IMAGES: R2Bucket;
   // CORS
   CORS_ORIGIN: string;
+  // R2 public CDN base URL (from wrangler vars)
+  R2_PUBLIC_BASE_URL: string;
 }
 
 // ── RAG Data Types ────────────────────────────────────────────────────────────
