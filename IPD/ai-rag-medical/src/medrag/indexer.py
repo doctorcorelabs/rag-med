@@ -2,15 +2,20 @@ import hashlib
 import html
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT, MATERI_GLOB
+from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT, MATERI_GLOB, EMBEDDING_MODEL
 from .models import ChunkRecord, ImageRecord, SourcePage
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 IMAGE_RE = re.compile(r"!\[(.*?)\]\((.*?)\)")
 WHITESPACE_RE = re.compile(r"\s+")
+TABLE_ROW_RE = re.compile(r"^\s*\|.+\|", re.MULTILINE)
+TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|", re.MULTILINE)
+NUMBERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+", re.MULTILINE)
+DOSE_BLOCK_RE = re.compile(r"\d+\s*(?:mg|mcg|µg|unit|ml|g/dl|g/dL|mmol|mEq|IU|gram|tablet|kapsul|ampul|vial)", re.IGNORECASE)
 
 # Section rules for KG edge extraction
 SECTION_CATEGORY_MAP = {
@@ -68,61 +73,177 @@ def discover_source_pages(workspace_root: Path) -> list[SourcePage]:
     return pages
 
 
-def _split_sections(markdown: str) -> list[tuple[str, str]]:
+def _split_sections(markdown: str) -> list[tuple[str, str, int, str]]:
+    """Split markdown into sections, returning (heading, content, level, parent_heading)."""
     matches = list(HEADING_RE.finditer(markdown))
     if not matches:
-        return [("General", markdown)]
+        return [("General", markdown, 1, "")]
 
-    sections: list[tuple[str, str]] = []
+    sections: list[tuple[str, str, int, str]] = []
+    parent_stack: list[tuple[int, str]] = []
+
     for idx, match in enumerate(matches):
+        level = len(match.group(1))
         heading = _normalize_text(match.group(2)) or "General"
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown)
         content = markdown[start:end]
-        sections.append((heading, content))
+
+        while parent_stack and parent_stack[-1][0] >= level:
+            parent_stack.pop()
+        parent_heading = parent_stack[-1][1] if parent_stack else ""
+        parent_stack.append((level, heading))
+
+        sections.append((heading, content, level, parent_heading))
     return sections
 
 
-def _chunk_text(value: str, max_chars: int = 1800) -> Iterable[str]:
-    # We don't want to over-normalize and destroy table/list line breaks yet
-    # so we'll do semantic splitting first.
+@dataclass
+class _SemanticBlock:
+    text: str
+    block_type: str  # "prose" | "table" | "list" | "dose_block"
+
+
+def _split_into_semantic_blocks(text: str) -> list[_SemanticBlock]:
+    """Split text into semantic blocks: tables, numbered lists, dose blocks, and prose."""
+    lines = text.split("\n")
+    blocks: list[_SemanticBlock] = []
+    current_lines: list[str] = []
+    current_type = "prose"
+
+    def _flush():
+        nonlocal current_lines, current_type
+        body = "\n".join(current_lines).strip()
+        if body:
+            blocks.append(_SemanticBlock(text=body, block_type=current_type))
+        current_lines = []
+        current_type = "prose"
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_table = bool(TABLE_ROW_RE.match(line))
+        is_numbered = bool(NUMBERED_LIST_RE.match(line))
+
+        if is_table:
+            if current_type != "table":
+                _flush()
+                current_type = "table"
+            current_lines.append(line)
+        elif is_numbered:
+            if current_type != "list":
+                _flush()
+                current_type = "list"
+            current_lines.append(line)
+        else:
+            if current_type in ("table", "list"):
+                if not line.strip():
+                    current_lines.append(line)
+                    _flush()
+                else:
+                    _flush()
+                    current_type = "prose"
+                    current_lines.append(line)
+            else:
+                current_lines.append(line)
+        i += 1
+
+    _flush()
+
+    final_blocks: list[_SemanticBlock] = []
+    for block in blocks:
+        if block.block_type == "prose" and DOSE_BLOCK_RE.search(block.text):
+            block = _SemanticBlock(text=block.text, block_type="dose_block")
+        final_blocks.append(block)
+
+    return final_blocks
+
+
+def _chunk_text(
+    value: str,
+    max_chars: int = 1800,
+    table_max: int = 2500,
+    heading: str = "",
+    source_name: str = "",
+    page_no: int = 0,
+) -> list[tuple[str, str]]:
+    """Returns list of (chunk_content, content_type) tuples."""
     text = value.strip()
     if not text:
         return []
-    if len(text) <= max_chars:
-        return [_normalize_text(text)]
 
-    chunks: list[str] = []
-    
-    # Split by double newline (paragraphs) first
-    paragraphs = re.split(r'\n\s*\n', text)
-    
+    metadata_prefix = f"[Konteks: {source_name} - Hal {page_no} | Topik Utama: {heading}]\n"
+
+    semantic_blocks = _split_into_semantic_blocks(text)
+    chunks: list[tuple[str, str]] = []
+
     current_chunk = ""
-    for p in paragraphs:
-        if len(current_chunk) + len(p) < max_chars:
-            current_chunk += p + "\n\n"
-        else:
-            if current_chunk:
-                chunks.append(_normalize_text(current_chunk))
-            
-            if len(p) >= max_chars:
-                # If a single paragraph/table is huge, split it by single newline
-                lines = p.split('\n')
-                sub_chunk = ""
-                for line in lines:
-                    if len(sub_chunk) + len(line) < max_chars:
-                        sub_chunk += line + "\n"
-                    else:
-                        if sub_chunk:
-                            chunks.append(_normalize_text(sub_chunk))
-                        sub_chunk = line + "\n"
-                current_chunk = sub_chunk + "\n"
+    current_type = "prose"
+    last_paragraph = ""
+
+    def _push_chunk(content: str, ctype: str):
+        normalized = _normalize_text(content) if ctype == "prose" else content.strip()
+        if normalized:
+            chunks.append((metadata_prefix + normalized, ctype))
+
+    for block in semantic_blocks:
+        budget = table_max if block.block_type == "table" else max_chars
+        max_payload = budget - len(metadata_prefix)
+
+        if block.block_type in ("table", "list", "dose_block"):
+            if current_chunk.strip():
+                _push_chunk(current_chunk, current_type)
+                current_chunk = ""
+                last_paragraph = ""
+
+            if len(block.text) <= max_payload:
+                _push_chunk(block.text, block.block_type)
             else:
-                current_chunk = p + "\n\n"
-                
+                lines = block.text.split("\n")
+                sub = ""
+                for line in lines:
+                    if len(sub) + len(line) + 1 > max_payload and sub:
+                        _push_chunk(sub, block.block_type)
+                        sub = ""
+                    sub += line + "\n"
+                if sub.strip():
+                    _push_chunk(sub, block.block_type)
+            continue
+
+        max_payload = max_chars - len(metadata_prefix)
+        paragraphs = re.split(r"\n\s*\n", block.text)
+        current_type = "prose"
+
+        for p in paragraphs:
+            if len(current_chunk) + len(p) > max_payload and current_chunk:
+                _push_chunk(current_chunk, current_type)
+                if len(last_paragraph) < (max_payload * 0.25):
+                    current_chunk = last_paragraph + "\n\n"
+                else:
+                    current_chunk = ""
+
+            if len(p) >= max_payload:
+                if current_chunk:
+                    _push_chunk(current_chunk, current_type)
+                    current_chunk = ""
+                lines = p.split("\n")
+                sub = ""
+                for line in lines:
+                    if len(sub) + len(line) < max_payload:
+                        sub += line + "\n"
+                    else:
+                        if sub:
+                            _push_chunk(sub, current_type)
+                        sub = line + "\n"
+                current_chunk = sub + "\n"
+                last_paragraph = ""
+            else:
+                current_chunk += p + "\n\n"
+                last_paragraph = p
+
     if current_chunk.strip():
-        chunks.append(_normalize_text(current_chunk))
-        
+        _push_chunk(current_chunk, current_type)
+
     return chunks
 
 
@@ -155,7 +276,7 @@ def parse_page(source_page: SourcePage) -> tuple[list[ChunkRecord], list[ImageRe
     image_records: list[ImageRecord] = []
     found_image_refs: set[str] = set()
 
-    for heading, raw_content in sections:
+    for heading, raw_content, level, parent_heading in sections:
         for alt_text, image_ref in IMAGE_RE.findall(raw_content):
             image_abs_path = (source_page.markdown_path.parent / image_ref).resolve()
             nearby = _normalize_text(IMAGE_RE.sub(" ", raw_content))[:300]
@@ -177,18 +298,31 @@ def parse_page(source_page: SourcePage) -> tuple[list[ChunkRecord], list[ImageRe
 
         cleaned = IMAGE_RE.sub(" ", raw_content)
         section_category = _detect_section_category(heading)
-        for chunk in _chunk_text(cleaned):
-            checksum_seed = f"{source_page.markdown_path}|{heading}|{chunk}"
+        section_chunks = _chunk_text(
+            cleaned,
+            heading=heading,
+            source_name=source_page.source_name,
+            page_no=source_page.page_no,
+        )
+        total_in_section = len(section_chunks)
+
+        for chunk_idx, (chunk_content, content_type) in enumerate(section_chunks):
+            checksum_seed = f"{source_page.markdown_path}|{heading}|{chunk_content}"
             chunk_records.append(
                 ChunkRecord(
                     source_name=source_page.source_name,
                     page_no=source_page.page_no,
                     heading=heading,
-                    content=chunk,
-                    disease_tags=_derive_tags(heading, chunk),
+                    content=chunk_content,
+                    disease_tags=_derive_tags(heading, chunk_content),
                     markdown_path=str(source_page.markdown_path),
                     checksum=_checksum(checksum_seed),
                     section_category=section_category or "Ringkasan_Klinis",
+                    parent_heading=parent_heading,
+                    chunk_index=chunk_idx,
+                    total_chunks=total_in_section,
+                    heading_level=level,
+                    content_type=content_type,
                 )
             )
 
@@ -233,7 +367,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             disease_tags TEXT NOT NULL,
             markdown_path TEXT NOT NULL,
             checksum TEXT NOT NULL,
-            section_category TEXT NOT NULL DEFAULT 'Ringkasan_Klinis'
+            section_category TEXT NOT NULL DEFAULT 'Ringkasan_Klinis',
+            parent_heading TEXT NOT NULL DEFAULT '',
+            chunk_index INTEGER NOT NULL DEFAULT 0,
+            total_chunks INTEGER NOT NULL DEFAULT 1,
+            heading_level INTEGER NOT NULL DEFAULT 2,
+            content_type TEXT NOT NULL DEFAULT 'prose'
         );
 
         CREATE VIRTUAL TABLE chunks_fts USING fts5(
@@ -274,8 +413,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images: list[ImageRecord]) -> None:
     conn.executemany(
         """
-        INSERT INTO chunks (source_name, page_no, heading, content, disease_tags, markdown_path, checksum, section_category)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO chunks (source_name, page_no, heading, content, disease_tags, markdown_path, checksum,
+                            section_category, parent_heading, chunk_index, total_chunks, heading_level, content_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -287,6 +427,11 @@ def _insert_records(conn: sqlite3.Connection, chunks: list[ChunkRecord], images:
                 record.markdown_path,
                 record.checksum,
                 record.section_category,
+                record.parent_heading,
+                record.chunk_index,
+                record.total_chunks,
+                record.heading_level,
+                record.content_type,
             )
             for record in chunks
         ],
@@ -366,12 +511,12 @@ def _build_vector_index(chunks: list[ChunkRecord], chroma_path: Path) -> None:
         metadata={"hnsw:space": "cosine"},
     )
 
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = SentenceTransformer(EMBEDDING_MODEL)
 
     batch_size = 64
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-        texts = [f"{c.heading}: {c.content}" for c in batch]
+        texts = [f"passage: {c.heading}: {c.content}" for c in batch]
         embeddings = model.encode(texts, show_progress_bar=False).tolist()
         ids = [f"chunk_{i + j}" for j in range(len(batch))]
         metadatas = [
@@ -381,7 +526,10 @@ def _build_vector_index(chunks: list[ChunkRecord], chroma_path: Path) -> None:
                 "heading": c.heading,
                 "section_category": c.section_category,
                 "disease_tags": c.disease_tags,
-                "content": c.content[:500],
+                "content": c.content,
+                "parent_heading": c.parent_heading,
+                "content_type": c.content_type,
+                "chunk_index": c.chunk_index,
             }
             for c in batch
         ]

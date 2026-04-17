@@ -20,6 +20,11 @@ class ChunkRecord:
     markdown_path: str
     checksum: str
     section_category: str = "Ringkasan_Klinis"
+    parent_heading: str = ""
+    chunk_index: int = 0
+    total_chunks: int = 1
+    heading_level: int = 2
+    content_type: str = "prose"
 
 
 @dataclass(slots=True)

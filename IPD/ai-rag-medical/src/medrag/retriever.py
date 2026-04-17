@@ -9,12 +9,13 @@ Key improvements over v1:
 - Dynamic section categorization (supports Patogenesis/Patofisiologi)
 """
 
+import hashlib
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH
+from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, EMBEDDING_MODEL, RERANKER_MODEL
 
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9/-]{1,}")
 
@@ -22,22 +23,37 @@ TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9/-]{1,}")
 # Medical Vocabulary: Synonyms & Abbreviations
 # ─────────────────────────────────────────────
 MEDICAL_SYNONYMS: dict[str, list[str]] = {
-    "tbc": ["tuberkulosis", "tuberculosis", "tb"],
-    "tuberkulosis": ["tbc", "tuberculosis", "tb"],
-    "tuberculosis": ["tbc", "tuberkulosis", "tb"],
-    "tb": ["tbc", "tuberkulosis", "tuberculosis"],
-    "dm": ["diabetes", "mellitus"],
-    "diabetes": ["dm"],
-    "ht": ["hipertensi"],
-    "hipertensi": ["ht", "hipertensif"],
-    "chf": ["gagal jantung", "heart failure"],
-    "ckd": ["gagal ginjal", "chronic kidney"],
-    "copd": ["ppok"],
-    "ppok": ["copd"],
-    "hiv": ["aids", "odha"],
+    # Pulmo
+    "tbc": ["tuberkulosis", "tb", "tuberculosis", "kp", "koch pulmonum"],
+    "tuberkulosis": ["tbc", "tb", "tuberculosis"],
+    "ppok": ["copd", "penyakit paru obstruktif kronis", "bronkitis kronis", "emfisema"],
+    "copd": ["ppok", "penyakit paru obstruktif kronis"],
+    "asma": ["asthma", "bengek", "mengi"],
+    "pneumonia": ["paru-paru basah", "bronkopneumonia", "cap", "hap", "vap"],
+    "ards": ["acute respiratory distress syndrome", "gagal napas akut"],
+    # Cardio
+    "acs": ["sindrom koroner akut", "ska", "serangan jantung", "stemi", "nstemi", "infark miokard"],
+    "stemi": ["infark miokard", "acs", "ska", "serangan jantung"],
+    "nstemi": ["infark miokard", "acs", "ska", "serangan jantung"],
+    "hfpef": ["gagal jantung", "heart failure", "chf"],
+    "hfrgef": ["gagal jantung", "heart failure", "chf"],
+    "chf": ["gagal jantung", "congestive heart failure", "hfpef", "hfref"],
+    "hipertensi": ["ht", "darah tinggi", "hypertension", "htn"],
+    "cad": ["penyakit jantung koroner", "pjk", "coronary artery disease"],
+    # Gastro/Hepa
+    "gerd": ["asam lambung", "refluks", "gastroesophageal reflux disease"],
+    "sirosis": ["cirrhosis", "pengerasan hati"],
+    # Endo
+    "dm": ["diabetes", "diabetes melitus", "kencing manis", "hiperglikemia"],
+    "diabetes": ["dm", "kencing manis", "diabetes melitus"],
+    # Infeksi
+    "dbd": ["dengue", "dengue hemorrhagic fever", "dhf", "demam berdarah"],
+    "hiv": ["aids", "odhav", "odha", "human immunodeficiency virus"],
     "aids": ["hiv", "odha"],
     "odha": ["hiv", "aids"],
-    "pneumonia": ["pneumonitis", "radang paru"],
+    # Pediatri
+    "hmd": ["hyaline membrane disease", "rds", "respiratory distress syndrome"],
+    # General
     "ca": ["kanker", "karsinoma", "neoplasma"],
     "anemia": ["anemis"],
     "isk": ["infeksi saluran kemih"],
@@ -182,15 +198,16 @@ DISEASE_KEYWORDS: list[str] = [
     "laringitis", "trakeitis", "epiglotitis", "croup",
     "pneumonitis hipersensitif", "pneumonitis",
     # Neonatologi/Pediatri
-    "hyaline membrane disease", "hmd",
+    "hyaline membrane disease", "hmd", "rds",
     "transient tachypnea", "respiratory distress",
     "meconium aspiration", "sepsis neonatorum",
-    # Penyakit Dalam
-    "diabetes", "hipertensi", "gagal jantung", "anemia",
-    "hiv", "aids", "meningitis", "hepatitis",
-    "sirosis", "gagal ginjal", "lupus", "rheumatoid",
-    "stroke", "infark miokard", "aritmia",
-    "demam tifoid", "malaria", "dengue", "leptospirosis",
+    # Penyakit Dalam (Cardio, Gastro, Endo, dll)
+    "diabetes", "hipertensi", "gagal jantung", "chf", "acs", "stemi", "nstemi",
+    "anemia", "hiv", "aids", "meningitis", "hepatitis",
+    "sirosis", "gerd", "dispepsia", "gagal ginjal", "ckd", "aki", 
+    "lupus", "rheumatoid", "stroke", "infark miokard", "aritmia",
+    "demam tifoid", "malaria", "dengue", "dbd", "leptospirosis",
+    "sindrom koroner akut", "ska", "penyakit jantung koroner", "pjk",
 ]
 
 
@@ -258,67 +275,209 @@ def _is_detail_request(query: str) -> bool:
     return any(kw in q_lower for kw in detail_keywords)
 
 
-def _normalize_query(query: str) -> list[str]:
-    """Normalize, correct typos, and expand query tokens."""
-    raw_tokens: list[str] = []
-    for token in TOKEN_RE.findall(query.lower()):
-        corrected = _correct_typo(token)
-        if corrected not in raw_tokens:
-            raw_tokens.append(corrected)
+def _filter_by_disease_relevance(
+    results: list[dict[str, Any]],
+    disease_name: str | None,
+) -> list[dict[str, Any]]:
+    """Filter out chunks that don't belong to the target disease."""
+    if not disease_name:
+        return results
 
-    # Expand with synonyms
-    expanded = _expand_synonyms(raw_tokens[:12])
-    return expanded[:20]
+    acceptable = {disease_name.lower()}
+    if disease_name.lower() in MEDICAL_SYNONYMS:
+        for syn in MEDICAL_SYNONYMS[disease_name.lower()]:
+            acceptable.add(syn.lower())
+
+    other_diseases = {
+        kw.lower() for kw in DISEASE_KEYWORDS
+        if kw.lower() not in acceptable
+    }
+
+    filtered = []
+    for item in results:
+        heading_lower = item.get("heading", "").lower()
+        content_lower = item.get("content", "").lower()[:400]
+        combined = f"{heading_lower} {content_lower}"
+
+        mentions_target = any(term in combined for term in acceptable)
+        heading_mentions_other = any(disease in heading_lower for disease in other_diseases if len(disease) > 2)
+        heading_is_generic = heading_lower.rstrip(":").strip() in {
+            "patofisiologi", "patogenesis", "definisi", "etiologi",
+            "tatalaksana", "tata laksana", "manifestasi klinis",
+            "diagnosis", "komplikasi", "prognosis", "general",
+            "pemeriksaan fisik", "pemeriksaan penunjang",
+            "anamnesis", "faktor risiko",
+        }
+
+        if mentions_target:
+            filtered.append(item)
+        elif heading_mentions_other:
+            continue
+        elif heading_is_generic and not mentions_target:
+            continue
+        else:
+            filtered.append(item)
+    return filtered
 
 
-def _fts_query(query: str) -> str:
-    tokens = _normalize_query(query)
-    if not tokens:
-        return ""
-    return " OR ".join(f"{token}*" for token in tokens)
+def search_chunks(
+    db_path: Path | None,
+    query: str,
+    top_k: int = 8,
+    chat_history: list[dict[str, Any]] | None = None,
+    chroma_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Hybrid FTS + Semantic Search with Ph.D.-Level Multi-Query Decomposition."""
+    database = db_path or DEFAULT_DB_PATH
 
+    enriched_query = _enrich_query_from_history(query, chat_history)
 
-def _detect_intent(query: str) -> str | None:
-    """Detect hierarchical intent from query to boost relevant sections."""
-    return _extract_topic_intent(query)
+    detected_disease = _extract_disease_name(enriched_query)
+    is_detail = _is_detail_request(enriched_query)
+    intent = _extract_topic_intent(enriched_query)
 
+    # Adaptive top_k
+    effective_top_k = top_k
+    if is_detail:
+        effective_top_k = max(top_k * 2, 16)
 
-# ─────────────────────────────────────────────
-# Search Functions
-# ─────────────────────────────────────────────
-def _fts_search(db_path: Path, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-    """BM25-based FTS5 search with synonym expansion."""
-    fts_query = _fts_query(query)
-    if not fts_query:
-        return []
+    queries_to_run = [enriched_query]
+    if is_detail or (detected_disease and not intent):
+        base = detected_disease if detected_disease else enriched_query
+        queries_to_run = [
+            f"{base} definisi etiologi patogenesis",
+            f"{base} anamnesis gejala klinis pemeriksaan fisik",
+            f"{base} diagnosis tatalaksana dosis obat algoritma",
+            f"{base} komplikasi prognosis",
+        ]
 
-    conn = sqlite3.connect(db_path)
+    all_results: list[dict[str, Any]] = []
+    seen_ids: set = set()
+
+    conn = sqlite3.connect(database)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            """
-            SELECT
-                c.id,
-                c.source_name,
-                c.page_no,
-                c.heading,
-                c.content,
-                c.markdown_path,
-                c.section_category,
-                bm25(chunks_fts) AS rank
-            FROM chunks_fts
-            JOIN chunks c ON c.id = chunks_fts.rowid
-            WHERE chunks_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (fts_query, top_k),
-        ).fetchall()
+        bm25_all: list[dict[str, Any]] = []
+        vector_all: list[dict[str, Any]] = []
+
+        for sub_query in queries_to_run:
+            sub_results = _execute_single_search(conn, sub_query, top_k=effective_top_k)
+            bm25_all.extend(sub_results)
+
+            vec_res = _vector_search(sub_query, top_k=effective_top_k, chroma_path=chroma_path)
+            if vec_res:
+                vector_all.extend(vec_res)
+
+        # Sparse-Dense Hybrid Fusion (RRF)
+        if vector_all:
+            merged_candidates = _reciprocal_rank_fusion(bm25_all, vector_all)
+        else:
+            merged_candidates = bm25_all
+
+        for row in merged_candidates:
+            cid = row.get("id") or row.get("checksum") or row.get("content", "")[:50]
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                all_results.append(row)
+
+        # Cross-encoder reranking for precision
+        reranked_results = _rerank_cross_encoder(
+            enriched_query, all_results, top_k=effective_top_k * len(queries_to_run)
+        )
+
+        # Disease relevance gating
+        filtered_results = _filter_by_disease_relevance(reranked_results, detected_disease)
+
+        # Jaccard dynamic pruning
+        pruned_results = _prune_redundant_chunks(filtered_results, similarity_threshold=0.6)
+
+        # Hierarchical sort by intent
+        sorted_results = _hierarchical_sort(
+            pruned_results, intent_category=intent, top_k=effective_top_k * len(queries_to_run)
+        )
+
+        # Context window expansion: fetch sibling chunks
+        expanded_results = _expand_context(conn, sorted_results, expand_siblings=1)
+
+        # Final dedup after expansion
+        final = _prune_redundant_chunks(expanded_results, similarity_threshold=0.7)
+
+        return final[:effective_top_k * len(queries_to_run)]
     finally:
         conn.close()
 
-    return [dict(row) for row in rows]
+def _execute_single_search(
+    conn: sqlite3.Connection,
+    query: str,
+    top_k: int = 8,
+) -> list[dict[str, Any]]:
+    """Executes FTS5 and fuzzy text search for a single query string."""
+    tokens = TOKEN_RE.findall(query)
+    if not tokens:
+        return []
 
+    corrected = [_correct_typo(t) for t in tokens if len(t) > 2]
+    expanded = _expand_synonyms(corrected)
+
+    search_terms = " OR ".join(f'"{term}"*' for term in expanded)
+
+    # 1. Exact/Prefix matches using FTS5
+    fts_rows = conn.execute(
+        f"""
+        SELECT c.*, bm25(chunks_fts, 5.0, 3.0, 1.0, 2.0) as score
+        FROM chunks_fts f
+        JOIN chunks c ON f.rowid = c.id
+        WHERE chunks_fts MATCH ?
+        ORDER BY score
+        LIMIT ?
+        """,
+        (search_terms, top_k * 2),
+    ).fetchall()
+
+    # 2. Fuzzy fallback (LIKE) if FTS is sparse
+    fuzzy_rows = []
+    if len(fts_rows) < top_k:
+        like_clauses = " OR ".join("(lower(content) LIKE ? OR lower(heading) LIKE ? OR lower(disease_tags) LIKE ?)" for _ in expanded)
+        params: list[Any] = []
+        for term in expanded:
+            params.extend([f"%{term.lower()}%", f"%{term.lower()}%", f"%{term.lower()}%"])
+        fuzzy_rows = conn.execute(
+            f"""
+            SELECT *, 100.0 as score
+            FROM chunks
+            WHERE {like_clauses}
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+    seen = set()
+    combined: list[dict[str, Any]] = []
+
+    for row in fts_rows + fuzzy_rows:
+        if row["id"] not in seen:
+            seen.add(row["id"])
+            combined.append(dict(row))
+
+    return combined
+
+def _hierarchical_sort(results: list[dict[str, Any]], intent_category: str | None, top_k: int) -> list[dict[str, Any]]:
+    """Sorts results based on intent category."""
+    if not intent_category:
+        return results[:top_k]
+    
+    priority = []
+    others = []
+    for r in results:
+        if r.get("section_category") == intent_category:
+            priority.append(r)
+        else:
+            others.append(r)
+    return (priority + others)[:top_k]
+
+# ─────────────────────────────────────────────
+# Apex RAG Advanced Methods
+# ─────────────────────────────────────────────
 
 def _vector_search(query: str, top_k: int = 10, chroma_path: Path | None = None) -> list[dict[str, Any]]:
     """Semantic vector search using ChromaDB."""
@@ -335,13 +494,9 @@ def _vector_search(query: str, top_k: int = 10, chroma_path: Path | None = None)
     try:
         client = chromadb.PersistentClient(path=str(chroma))
         collection = client.get_collection("medrag_chunks")
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        model = SentenceTransformer(EMBEDDING_MODEL)
 
-        # Also expand the semantic query with corrected terms
-        tokens = TOKEN_RE.findall(query.lower())
-        corrected_query = " ".join(_correct_typo(t) for t in tokens)
-        query_embedding = model.encode([corrected_query]).tolist()
-
+        query_embedding = model.encode([f"query: {query}"]).tolist()
         results = collection.query(
             query_embeddings=query_embedding,
             n_results=min(top_k, collection.count()),
@@ -350,223 +505,155 @@ def _vector_search(query: str, top_k: int = 10, chroma_path: Path | None = None)
 
         items = []
         if results and results["metadatas"]:
-            for meta, doc, dist in zip(
-                results["metadatas"][0],
-                results["documents"][0],
-                results["distances"][0],
-            ):
+            for meta, doc, dist in zip(results["metadatas"][0], results["documents"][0], results["distances"][0]):
                 items.append({
                     "source_name": meta.get("source_name", ""),
                     "page_no": meta.get("page_no", 0),
                     "heading": meta.get("heading", ""),
-                    "content": meta.get("content", doc[:500]),
+                    "content": meta.get("content", "") or doc,
                     "section_category": meta.get("section_category", "Ringkasan_Klinis"),
                     "markdown_path": "",
+                    "parent_heading": meta.get("parent_heading", ""),
+                    "content_type": meta.get("content_type", "prose"),
+                    "chunk_index": meta.get("chunk_index", 0),
                     "vector_score": 1.0 - float(dist),
                 })
         return items
     except Exception as e:
-        print(f"[WARN] Vector search failed: {e}")
         return []
 
-
-def _reciprocal_rank_fusion(
-    bm25_results: list[dict[str, Any]],
-    vector_results: list[dict[str, Any]],
-    k: int = 60,
-) -> list[dict[str, Any]]:
+def _reciprocal_rank_fusion(bm25_results: list[dict[str, Any]], vector_results: list[dict[str, Any]], k: int = 60) -> list[dict[str, Any]]:
     """Combine BM25 and vector results using Reciprocal Rank Fusion."""
     scores: dict[str, float] = {}
     data: dict[str, dict[str, Any]] = {}
 
-    def key(item: dict[str, Any]) -> str:
-        return f"{item['source_name']}|{item['page_no']}|{item['heading'][:50]}"
+    def get_key(item: dict[str, Any]) -> str:
+        content_hash = hashlib.md5(item.get("content", "")[:200].encode()).hexdigest()[:8]
+        return f"{item.get('source_name','')}|{item.get('page_no','')}|{item.get('heading','')}|{content_hash}"
 
     for rank, item in enumerate(bm25_results):
-        k_ = key(item)
-        scores[k_] = scores.get(k_, 0.0) + 1.0 / (k + rank + 1)
-        data[k_] = item
+        key = get_key(item)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        data[key] = item
 
     for rank, item in enumerate(vector_results):
-        k_ = key(item)
-        scores[k_] = scores.get(k_, 0.0) + 1.0 / (k + rank + 1)
-        if k_ not in data:
-            data[k_] = item
+        key = get_key(item)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        if key not in data:
+            data[key] = item
 
-    sorted_keys = sorted(scores, key=lambda k_: scores[k_], reverse=True)
+    sorted_keys = sorted(scores, key=lambda key_: scores[key_], reverse=True)
     return [data[k_] for k_ in sorted_keys]
 
+def _jaccard_similarity(s1: str, s2: str) -> float:
+    set1 = set(s1.split())
+    set2 = set(s2.split())
+    if not set1 or not set2: return 0.0
+    return len(set1.intersection(set2)) / len(set1.union(set2))
 
-def _filter_by_disease_relevance(
-    results: list[dict[str, Any]],
-    disease_name: str | None,
-    query: str,
-) -> list[dict[str, Any]]:
-    """Filter out chunks that don't belong to the target disease.
-
-    This prevents cross-contamination where chunks about Abses Paru
-    appear when searching for Tuberkulosis, etc.
-
-    Strategy:
-    - A chunk PASSES if it explicitly mentions the target disease
-    - A chunk FAILS if its heading mentions a DIFFERENT disease
-    - A chunk with a GENERIC heading (e.g. "Patofisiologi:") FAILS
-      unless its content mentions the target disease
-    """
-    if not disease_name:
-        return results
-
-    # Build list of acceptable disease terms (including synonyms)
-    acceptable = {disease_name.lower()}
-    if disease_name.lower() in MEDICAL_SYNONYMS:
-        for syn in MEDICAL_SYNONYMS[disease_name.lower()]:
-            acceptable.add(syn.lower())
-
-    # Also gather all disease keywords that are NOT acceptable
-    other_diseases = {
-        kw.lower() for kw in DISEASE_KEYWORDS
-        if kw.lower() not in acceptable
-    }
-
-    filtered = []
+def _prune_redundant_chunks(results: list[dict[str, Any]], similarity_threshold: float = 0.6) -> list[dict[str, Any]]:
+    """Prune chunks that are highly overlapping via Jaccard text similarity to save LLM context window."""
+    pruned = []
     for item in results:
-        heading_lower = item.get("heading", "").lower()
-        content_lower = item.get("content", "").lower()[:400]
-        source_lower = item.get("source_name", "").lower()
-        combined = f"{heading_lower} {content_lower}"
-
-        # Does this chunk mention the target disease?
-        mentions_target = any(term in combined for term in acceptable)
-
-        # Does the heading mention a DIFFERENT specific disease?
-        heading_mentions_other = any(
-            disease in heading_lower
-            for disease in other_diseases
-            if len(disease) > 2  # skip very short abbreviations
-        )
-
-        # Is the heading generic (like "Patofisiologi:", "Definisi", etc.)?
-        heading_is_generic = heading_lower.rstrip(":").strip() in {
-            "patofisiologi", "patogenesis", "definisi", "etiologi",
-            "tatalaksana", "tata laksana", "manifestasi klinis",
-            "diagnosis", "komplikasi", "prognosis", "general",
-            "pemeriksaan fisik", "pemeriksaan penunjang",
-            "anamnesis", "faktor risiko",
-        }
-
-        if mentions_target:
-            # Explicitly mentions target → always include
-            filtered.append(item)
-        elif heading_mentions_other:
-            # Heading explicitly about another disease → exclude
-            continue
-        elif heading_is_generic and not mentions_target:
-            # Generic heading without target disease mention → exclude
-            # (e.g. "Patofisiologi:" for Emboli Paru when searching TBC)
-            continue
-        else:
-            # Neutral chunk → include
-            filtered.append(item)
-
-    # Safety net: if filtering removed too many, relax
-    if len(filtered) < 3 and len(results) >= 3:
-        # Re-add items that at least mention target in content
-        for item in results:
-            if item not in filtered:
-                content_lower = item.get("content", "").lower()[:400]
-                if any(term in content_lower for term in acceptable):
-                    filtered.append(item)
-            if len(filtered) >= 3:
+        content = item.get("content", "").lower()
+        is_redundant = False
+        for saved in pruned:
+            if _jaccard_similarity(content, saved.get("content", "").lower()) > similarity_threshold:
+                is_redundant = True
                 break
-        # If still too few, return original (degraded but non-empty)
-        if len(filtered) < 2:
-            return results[:top_k] if 'top_k' in dir() else results[:8]
-
-    return filtered
+        if not is_redundant:
+            pruned.append(item)
+    return pruned
 
 
-def search_chunks(
-    db_path: Path | None,
-    query: str,
-    top_k: int = 8,
-    chat_history: list[dict[str, Any]] | None = None,
-    chroma_path: Path | None = None,
-) -> list[dict[str, Any]]:
-    """Hybrid (BM25 + Vector) + Hierarchical + Disease-filtered search."""
-    database = db_path or DEFAULT_DB_PATH
-    chroma = chroma_path or DEFAULT_CHROMA_PATH
-
-    # Step 1: Enrich query with multi-turn context
-    enriched_query = query
-    if chat_history:
-        recent_context = " ".join(
-            msg["content"] for msg in chat_history[-4:]
-            if msg.get("role") == "user"
-        )
-        if recent_context:
-            enriched_query = f"{recent_context} {query}"
-
-    # Step 2: Extract disease name and topic intent
-    disease_name = _extract_disease_name(enriched_query)
-    intent_category = _detect_intent(query)  # Use original query for intent
-    is_detail = _is_detail_request(query)
-
-    # Step 3: BM25 search (with synonym expansion)
-    fetch_k = top_k + 8 if is_detail else top_k + 4
-    bm25_results = _fts_search(database, enriched_query, top_k=fetch_k)
-
-    # Step 4: Vector search
-    vector_results = _vector_search(enriched_query, top_k=fetch_k, chroma_path=chroma)
-
-    # Step 5: Merge with RRF
-    if vector_results:
-        merged = _reciprocal_rank_fusion(bm25_results, vector_results)
-    else:
-        merged = bm25_results
-
-    # Step 6: Filter by disease relevance (prevent cross-contamination)
-    if not is_detail:
-        merged = _filter_by_disease_relevance(merged, disease_name, query)
-
-    # Step 7: Hierarchical re-ranking by intent
-    if intent_category and not is_detail:
-        # Boost chunks matching detected intent to top
-        priority = []
-        secondary = []
-        others = []
-        for c in merged:
-            cat = c.get("section_category", "")
-            heading_lower = c.get("heading", "").lower()
-            content_lower = c.get("content", "").lower()[:200]
-
-            # Check if chunk matches intent via category OR heading/content keywords
-            matches_intent = (
-                cat == intent_category
-                or any(
-                    kw in heading_lower or kw in content_lower
-                    for kw in _get_intent_keywords(intent_category)
-                )
-            )
-
-            if matches_intent:
-                priority.append(c)
-            elif disease_name and disease_name.lower() in heading_lower:
-                secondary.append(c)
-            else:
-                others.append(c)
-
-        merged = priority + secondary + others
-
-    return merged[:top_k]
+_reranker = None
 
 
-def _get_intent_keywords(intent_category: str) -> list[str]:
-    """Get all keywords associated with an intent category."""
-    keywords = []
-    for kw, cat in INTENT_MAP.items():
-        if cat == intent_category:
-            keywords.append(kw)
-    return keywords
+def _rerank_cross_encoder(query: str, candidates: list[dict[str, Any]], top_k: int = 12) -> list[dict[str, Any]]:
+    """Rerank candidates using a cross-encoder model for higher precision."""
+    if not candidates:
+        return candidates
+
+    global _reranker
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError:
+        return candidates[:top_k]
+
+    if _reranker is None:
+        _reranker = CrossEncoder(RERANKER_MODEL)
+
+    pairs = [(query, c.get("content", "")) for c in candidates]
+    scores = _reranker.predict(pairs)
+
+    ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+    return [c for c, _s in ranked[:top_k]]
+
+
+def _expand_context(conn: sqlite3.Connection, retrieved_chunks: list[dict[str, Any]], expand_siblings: int = 1) -> list[dict[str, Any]]:
+    """Expand each retrieved chunk with its sibling chunks from the same section."""
+    if not retrieved_chunks:
+        return retrieved_chunks
+
+    expanded = []
+    seen_ids: set[int] = set()
+
+    for chunk in retrieved_chunks:
+        chunk_id = chunk.get("id")
+        if not chunk_id:
+            expanded.append(chunk)
+            continue
+
+        if chunk_id in seen_ids:
+            continue
+
+        rows = conn.execute(
+            """
+            SELECT * FROM chunks
+            WHERE source_name = ? AND heading = ?
+            AND id BETWEEN ? AND ?
+            ORDER BY id
+            """,
+            (
+                chunk["source_name"],
+                chunk["heading"],
+                chunk_id - expand_siblings,
+                chunk_id + expand_siblings,
+            ),
+        ).fetchall()
+
+        if len(rows) > 1:
+            merged_content = "\n\n".join(dict(r)["content"] for r in rows)
+            merged_chunk = dict(chunk)
+            merged_chunk["content"] = merged_content
+            merged_chunk["expanded"] = True
+            for r in rows:
+                seen_ids.add(r["id"])
+            expanded.append(merged_chunk)
+        else:
+            seen_ids.add(chunk_id)
+            expanded.append(chunk)
+
+    return expanded
+
+
+def _enrich_query_from_history(query: str, chat_history: list[dict[str, Any]] | None) -> str:
+    """Enrich query with disease context from chat history for follow-up questions."""
+    if not chat_history:
+        return query
+
+    recent_context = " ".join(
+        turn["content"] for turn in chat_history[-4:]
+        if turn.get("role") == "user"
+    )
+
+    current_disease = _extract_disease_name(query)
+    if not current_disease:
+        history_disease = _extract_disease_name(recent_context)
+        if history_disease:
+            return f"{history_disease} {query}"
+
+    return query
 
 
 # ─────────────────────────────────────────────
@@ -578,16 +665,10 @@ def related_images(
     evidence: list[dict[str, Any]],
     limit: int = 3,
 ) -> list[dict[str, Any]]:
-    """Find relevant images with strict disease-relevance gating and intent alignment.
-    
-    1. Fuzzy-Page Search: Expands evidence pages (+/- 1 page) to catch large diagrams.
-    2. Intent-Driven Retrieval: Boosts images containing keywords like "alur" or "diagnosis" 
-       if the user's querying about clinical pathways.
-    """
+    """Find relevant images with strict disease-relevance gating and intent alignment."""
     database = db_path or DEFAULT_DB_PATH
     disease_name = _extract_disease_name(query)
 
-    # Build disease search terms (including synonyms)
     search_terms: list[str] = []
     if disease_name:
         search_terms.append(disease_name)
@@ -608,7 +689,6 @@ def related_images(
     conn = sqlite3.connect(database)
     conn.row_factory = sqlite3.Row
     try:
-        # Phase 1: Fuzzy Page Search (+/- 1 Page)
         where_pairs = set()
         for item in evidence:
             src = item["source_name"]
@@ -620,7 +700,6 @@ def related_images(
         phase1_results = []
         if where_pairs:
             page_clauses = " OR ".join("(source_name = ? AND page_no = ?)" for _ in where_pairs)
-            # Find ANY image in these pages mentioning the disease
             disease_clauses = " OR ".join(
                 "(lower(heading) LIKE ? OR lower(nearby_text) LIKE ? OR lower(alt_text) LIKE ?)"
                 for _ in search_terms

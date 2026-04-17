@@ -1,14 +1,15 @@
 """
-Medical RAG AI Client — v2.0 (Adaptive Copilot Integration)
+Medical RAG AI Client — v3.0 (Advanced Copilot Integration)
 
-Key improvements:
-- Dynamic system prompt that adapts to user intent (specific vs general)
-- Only generates sections relevant to the question
-- Deeply extracts information from referenced pages
-- Better JSON parsing and error handling
+Key improvements over v2:
+- Structured XML evidence formatting with clinical ordering
+- Granular inline citations via evidence IDs [E1], [E2] resolved to source references
+- Two-pass synthesis for detail requests (extraction then narrative)
+- Evidence coverage metadata in output
 """
 
 import json
+import re
 import urllib.request
 import urllib.error
 import base64
@@ -27,6 +28,15 @@ from .retriever import (
 COPILOT_TOKEN_URL = 'https://api.github.com/copilot_internal/v2/token'
 COPILOT_CHAT_URL = 'https://api.githubcopilot.com/chat/completions'
 
+CLINICAL_ORDER: dict[str, int] = {
+    "Definisi": 0, "Etiologi": 1, "Patogenesis": 2,
+    "Anamnesis": 3, "Manifestasi_Klinis": 4, "Pemeriksaan_Fisik": 5,
+    "Diagnosis": 6, "Tatalaksana": 7, "Komplikasi": 8, "Prognosis": 9,
+    "Ringkasan_Klinis": 10,
+}
+
+EVIDENCE_REF_RE = re.compile(r"\[E(\d+)\]")
+
 
 def get_copilot_token(github_token: str) -> str:
     req = urllib.request.Request(COPILOT_TOKEN_URL, headers={
@@ -43,15 +53,65 @@ def get_copilot_token(github_token: str) -> str:
         raise Exception(f"Failed to get Copilot token: {e}")
 
 
+def _format_evidence_structured(evidence: list[dict[str, Any]]) -> str:
+    """Format evidence with XML-like tags and numbering for precise LLM referencing."""
+    sorted_evidence = sorted(
+        evidence,
+        key=lambda e: CLINICAL_ORDER.get(e.get("section_category", ""), 99),
+    )
+
+    context = ""
+    for idx, item in enumerate(sorted_evidence, 1):
+        context += f"""
+<evidence id="{idx}">
+  <source>{item.get('source_name', '')}</source>
+  <page>{item.get('page_no', '')}</page>
+  <heading>{item.get('heading', '')}</heading>
+  <parent_heading>{item.get('parent_heading', '')}</parent_heading>
+  <section_type>{item.get('section_category', 'General')}</section_type>
+  <content_type>{item.get('content_type', 'prose')}</content_type>
+  <content>
+{item.get('content', '')}
+  </content>
+</evidence>
+"""
+    return context, sorted_evidence
+
+
+def _resolve_evidence_citations(text: str, evidence: list[dict[str, Any]]) -> str:
+    """Convert [E1], [E2] markers to human-readable (Source, Hal N) references."""
+    def _replace(match: re.Match) -> str:
+        idx = int(match.group(1))
+        if 1 <= idx <= len(evidence):
+            item = evidence[idx - 1]
+            return f"({item.get('source_name', '?')}, Hal {item.get('page_no', '?')})"
+        return match.group(0)
+
+    return EVIDENCE_REF_RE.sub(_replace, text)
+
+
+def _extract_used_evidence_ids(parsed_json: dict[str, Any]) -> list[int]:
+    """Scan all markdown sections for [EN] references and collect used evidence IDs."""
+    used: set[int] = set()
+    for sec in parsed_json.get("sections", []):
+        md = sec.get("markdown", "")
+        for m in EVIDENCE_REF_RE.finditer(md):
+            used.add(int(m.group(1)))
+    vlog = parsed_json.get("verification_log", "")
+    for m in EVIDENCE_REF_RE.finditer(vlog):
+        used.add(int(m.group(1)))
+    return sorted(used)
+
+
 def _build_system_prompt(
     query: str,
     is_detail: bool,
     intent_category: str | None,
     disease_name: str | None,
+    evidence_count: int = 0,
 ) -> str:
     """Build an adaptive system prompt based on what the user is asking."""
 
-    # Map intent to human-readable topic name
     topic_names: dict[str, str] = {
         "Definisi": "Definisi",
         "Etiologi": "Etiologi dan Faktor Risiko",
@@ -66,7 +126,6 @@ def _build_system_prompt(
     }
 
     if is_detail:
-        # User wants comprehensive coverage
         section_instruction = """Buatlah pembahasan KOMPREHENSIF yang mencakup section-section berikut (jika informasi tersedia di referensi):
 1. Definisi
 2. Etiologi dan Faktor Risiko
@@ -89,7 +148,6 @@ PENTING: Fokuskan jawaban HANYA pada topik "{topic}". Buatlah pembahasan yang ME
 - Buat jumlah section sesuai kebutuhan (bisa 1-3 section yang semuanya relevan dengan topik).
 - Gunakan sub-bullet, penomoran, atau tabel untuk memperjelas."""
     else:
-        # General question — let AI decide
         section_instruction = """Analisis pertanyaan user dan buat section yang paling relevan.
 - Jika pertanyaan umum tentang suatu penyakit, buat ringkasan klinis yang mencakup aspek-aspek utama yang tersedia di referensi.
 - Jika pertanyaan spesifik, fokuskan pada topik yang diminta.
@@ -99,21 +157,37 @@ PENTING: Fokuskan jawaban HANYA pada topik "{topic}". Buatlah pembahasan yang ME
     return f"""Anda adalah Asisten Klinis (Medical RAG) profesional berbasis referensi terverifikasi.
 
 PRINSIP UTAMA:
-1. Jawab HANYA berdasarkan DOKUMEN REFERENSI yang diberikan. JANGAN mengarang atau menambahkan informasi dari pengetahuan umum.
+1. Jawab HANYA berdasarkan DOKUMEN REFERENSI yang diberikan dalam tag <evidence>.
 2. Informasi dari referensi adalah SUMBER UTAMA. AI hanya bertugas menyusun dan memperjelas informasi tersebut agar lebih mudah dipahami.
-3. KEMAMPUAN VISION (EKSTRAKSI PROTOKOL): Jika Anda menerima input gambar berupa flowchart/algoritma/bagan tatalaksana, Anda WAJIB mengubah alur visual tersebut menjadi pedoman prosedural langkah-demi-langkah (IF-THEN-ELSE). Buat sub-bagian tersendiri seperti "Protokol Visual Tatalaksana" yang membedah cabang-cabang keputusan klinis di dalam gambar ke dalam bentuk teks / list terstruktur.
-4. RESOLUSI KONFLIK PEDOMAN: Jika Anda menemukan perbedaan data/pedoman antar sumber referensi yang diberikan (misalnya beda dosis antara buku Atria vs Mediko), JANGAN menggabungkannya secara ambigu. Anda WAJIB membuat sub-bagian "Perbandingan Pedoman" yang secara eksplisit memisahkan apa yang dikatakan oleh masing-masing referensi.
-5. Gunakan bahasa Indonesia formal medis. Tebalkan (**bold**) istilah medis penting, gunakan _italic_ untuk nama latin/organisme.
+3. KEMAMPUAN VISION (EKSTRAKSI PROTOKOL): Jika Anda menerima input gambar berupa flowchart/bagan tatalaksana, Anda WAJIB mengubah alur visual tersebut menjadi pedoman prosedural langkah-demi-langkah (IF-THEN-ELSE) secara berurutan.
+4. RESOLUSI KONFLIK PEDOMAN: Jika menemukan perbedaan data antar referensi, buat baris "Perbandingan Pedoman".
+5. CLINICAL REASONING ENGINE (LEVEL KONSULEN):
+   - Anda HARUS menyertakan "Diagnosis Banding (DDx)" berdasarkan kemiripan gejala klinis, JIKA ada dalam referensi.
+   - Anda HARUS memunculkan "Red Flags" atau kondisi gawat darurat yang wajib diwaspadai, JIKA disinggung dalam referensi.
+6. AGENTIC SELF-REFLECTION: LLM WAJIB melakukan validasi internal sebelum menjawab! Buat "verification_log" di awal hasil JSON-mu, dan pastikan setiap angka dosis dan prosedur benar-benar tertera di evidence. Jangan berhalusinasi dosis!
+7. Gunakan bahasa Indonesia formal medis. Tebalkan (**bold**) istilah medis, gunakan _italic_ untuk nama latin.
+
+EVIDENCE COVERAGE CHECK:
+- Anda menerima {evidence_count} evidence documents.
+- Pastikan SETIAP evidence digunakan minimal 1x jika relevan.
+- Di verification_log, sebutkan evidence mana saja yang Anda gunakan dan yang tidak relevan.
+
+SISTEM CITATION GRANULAR:
+- Setiap klaim/fakta medis WAJIB diakhiri dengan citation format [E1], [E2], dst. yang merujuk ke <evidence id="N">.
+- Setiap kalimat yang menyebut angka, dosis, atau prosedur HARUS memiliki citation.
+- Contoh: **Aspirin** diberikan dosis loading **160-320 mg** per oral [E3].
+- Anda boleh menggabungkan citation: [E1][E3] atau [E2, E5].
 
 {section_instruction}
 
 FORMAT OUTPUT (RAW JSON VALID, TANPA markdown code block):
 {{
+  "verification_log": "Catatan verifikasi: Evidence yang digunakan: [E1], [E2], ... Evidence tidak relevan: [EN] karena ...",
   "disease": "Nama Penyakit/Kondisi",
   "sections": [
     {{
       "title": "Judul Section",
-      "markdown": "Konten dalam **Markdown**. Gunakan:\\n- **Bold** untuk istilah penting\\n- _Italic_ untuk nama latin\\n- Bullet points untuk daftar\\n- Tabel | untuk data komparatif\\n- Penomoran untuk alur/tahapan"
+      "markdown": "Konten dalam **Markdown** dengan citation [E1] di setiap klaim.\\nGunakan:\\n- **Bold** untuk istilah penting\\n- _Italic_ untuk nama latin\\n- Bullet points untuk daftar\\n- Tabel | untuk data komparatif\\n- Penomoran untuk alur/tahapan"
     }}
   ],
   "citations": ["Sumber p.Halaman"]
@@ -124,88 +198,46 @@ ATURAN KETAT:
 - Output HARUS berupa raw JSON valid
 - Gunakan \\n untuk baris baru di dalam JSON string
 - JANGAN masukkan section dengan konten "Tidak tersedia di referensi"
-- Setiap poin HARUS menyertakan referensi inline seperti: (Nama_Sumber p.XX)
+- Gunakan [E1], [E2] dst. untuk SETIAP klaim medis penting
 """
 
 
-def ask_copilot_adaptive(
-    disease_name: str,
-    evidence: list[dict[str, Any]],
-    github_token: str,
-    chat_history: list[dict[str, Any]] | None = None,
-    images: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Call Copilot API with adaptive prompt, multi-turn history, and Vision API support."""
-    if not github_token:
-        raise ValueError("GITHUB_TOKEN is missing or empty")
+def _build_extraction_prompt(evidence_count: int) -> str:
+    """Build system prompt for Pass 1 (fact extraction) of two-pass synthesis."""
+    return f"""Anda adalah mesin ekstraksi fakta medis. Tugas Anda HANYA mengekstrak fakta dari {evidence_count} evidence documents yang diberikan.
 
-    copilot_token = get_copilot_token(github_token)
+INSTRUKSI:
+1. Baca SEMUA evidence yang diberikan dalam tag <evidence>.
+2. Ekstrak SEMUA fakta penting per section klinis.
+3. Setiap fakta HARUS disertai referensi [E1], [E2], dst.
+4. JANGAN menambahkan informasi yang tidak ada di evidence.
+5. JANGAN membuat narasi. Hanya buat bullet list fakta.
 
-    # Build rich context from evidence
-    context_text = ""
-    for item in evidence:
-        context_text += (
-            f"\n--- Source: {item['source_name']} (Page {item['page_no']}) ---\n"
-            f"Heading: {item['heading']}\n"
-            f"Section Category: {item.get('section_category', 'General')}\n"
-            f"{item['content']}\n"
-        )
+FORMAT OUTPUT (RAW JSON VALID):
+{{
+  "extracted_facts": [
+    {{
+      "section": "Nama Section (Definisi/Etiologi/Patogenesis/dst)",
+      "facts": [
+        "Fakta 1 dari evidence [E1]",
+        "Fakta 2 dari evidence [E3]"
+      ]
+    }}
+  ],
+  "evidence_used": [1, 2, 3],
+  "evidence_unused": [4, 5]
+}}
+"""
 
-    # Detect user intent for adaptive prompt
-    intent_category = _extract_topic_intent(disease_name)
-    is_detail = _is_detail_request(disease_name)
-    detected_disease = _extract_disease_name(disease_name)
 
-    system_prompt = _build_system_prompt(
-        query=disease_name,
-        is_detail=is_detail,
-        intent_category=intent_category,
-        disease_name=detected_disease,
-    )
-
-    user_prompt = f"Query Klinis: {disease_name}\n\nDokumen Referensi Tersedia:\n{context_text}"
-
-    # Build multi-turn messages array
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": system_prompt},
-    ]
-
-    # Insert previous chat history for multi-turn context
-    if chat_history:
-        for turn in chat_history[-6:]:  # Keep last 3 exchanges
-            role = turn.get("role", "user")
-            content = turn.get("content", "")
-            if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": content})
-
-    # Prepare user message content (text + images if available)
-    if images:
-        user_content = [{"type": "text", "text": user_prompt}]
-        for img in images:
-            img_path = img.get("image_abs_path", "")
-            if not img_path:
-                continue
-            try:
-                mime_type, _ = mimetypes.guess_type(img_path)
-                mime_type = mime_type or "image/jpeg"
-                with open(img_path, "rb") as image_file:
-                    base64_img = base64.b64encode(image_file.read()).decode('utf-8')
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{base64_img}"
-                        }
-                    })
-            except Exception as e:
-                print(f"[WARN] Failed to encode image for Vision API: {e}")
-
-        messages.append({"role": "user", "content": user_content})
-    else:
-        messages.append({"role": "user", "content": user_prompt})
-
+def _call_copilot(
+    copilot_token: str,
+    messages: list[dict[str, Any]],
+) -> str:
+    """Make a single Copilot API call and return raw content string."""
     body = {
         "messages": messages,
-        "model": "gpt-4.1",  # User requested gpt-4.1 for vision
+        "model": "gpt-4.1",
         "temperature": 0.1,
         "stream": False,
     }
@@ -221,50 +253,136 @@ def ask_copilot_adaptive(
         'Openai-Intent': 'conversation-panel',
     }, method='POST')
 
+    with urllib.request.urlopen(req) as response:
+        resp_data = json.loads(response.read().decode('utf-8'))
+        return resp_data['choices'][0]['message']['content']
+
+
+def _parse_json_response(raw_content: str) -> dict[str, Any]:
+    """Parse LLM response, stripping markdown fences if present."""
+    content = raw_content.strip()
+    if content.startswith("```json"):
+        content = content[7:]
+    if content.startswith("```"):
+        content = content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    return json.loads(content.strip())
+
+
+def _attach_images_to_content(
+    user_content: list[dict[str, Any]],
+    images: list[dict[str, Any]],
+) -> None:
+    """Encode and append base64 images to the user content array."""
+    for img in images:
+        img_path = img.get("image_abs_path", "")
+        if not img_path:
+            continue
+        try:
+            mime_type, _ = mimetypes.guess_type(img_path)
+            mime_type = mime_type or "image/jpeg"
+            with open(img_path, "rb") as image_file:
+                base64_img = base64.b64encode(image_file.read()).decode('utf-8')
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{base64_img}"},
+                })
+        except Exception as e:
+            print(f"[WARN] Failed to encode image for Vision API: {e}")
+
+
+def _postprocess_response(
+    parsed_json: dict[str, Any],
+    sorted_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Clean up, resolve citations, compute coverage metadata."""
+    # Migrate legacy "points" → "markdown"
+    if "sections" in parsed_json:
+        for sec in parsed_json["sections"]:
+            if "points" in sec and "markdown" not in sec:
+                sec["markdown"] = "\n".join(f"- {p}" for p in sec["points"])
+                del sec["points"]
+
+        parsed_json["sections"] = [
+            sec for sec in parsed_json["sections"]
+            if sec.get("markdown", "").strip()
+            and "tidak tersedia" not in sec.get("markdown", "").lower()
+            and "belum tersedia" not in sec.get("markdown", "").lower()
+            and sec.get("markdown", "").strip() != "-"
+        ]
+
+    # Collect used evidence IDs before resolving
+    used_ids = _extract_used_evidence_ids(parsed_json)
+
+    # Resolve [E1] → (Source, Hal N) in all markdown sections
+    for sec in parsed_json.get("sections", []):
+        if "markdown" in sec:
+            sec["markdown"] = _resolve_evidence_citations(sec["markdown"], sorted_evidence)
+    if "verification_log" in parsed_json:
+        parsed_json["verification_log"] = _resolve_evidence_citations(
+            parsed_json["verification_log"], sorted_evidence
+        )
+
+    # Build real citations from evidence
+    unique_citations: list[str] = []
+    for item in sorted_evidence:
+        c = f"{item['source_name']} p.{item['page_no']}"
+        if c not in unique_citations:
+            unique_citations.append(c)
+    parsed_json["citations"] = unique_citations
+
+    # Evidence coverage metadata
+    total = len(sorted_evidence)
+    unused_ids = sorted(set(range(1, total + 1)) - set(used_ids))
+    parsed_json["evidence_coverage"] = {
+        "total_evidence": total,
+        "used_evidence": used_ids,
+        "unused_evidence": unused_ids,
+        "coverage_percent": round(len(used_ids) / total * 100, 1) if total else 0,
+    }
+    parsed_json["grounded"] = True
+
+    return parsed_json
+
+
+def ask_copilot_adaptive(
+    disease_name: str,
+    evidence: list[dict[str, Any]],
+    github_token: str,
+    chat_history: list[dict[str, Any]] | None = None,
+    images: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Call Copilot API with structured evidence, granular citations, and optional two-pass synthesis."""
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing or empty")
+
+    copilot_token = get_copilot_token(github_token)
+
+    context_text, sorted_evidence = _format_evidence_structured(evidence)
+
+    intent_category = _extract_topic_intent(disease_name)
+    is_detail = _is_detail_request(disease_name)
+    detected_disease = _extract_disease_name(disease_name)
+
+    user_prompt = f"Query Klinis: {disease_name}\n\nDokumen Referensi Tersedia:\n{context_text}"
+
     try:
-        with urllib.request.urlopen(req) as response:
-            resp_data = json.loads(response.read().decode('utf-8'))
-            raw_content = resp_data['choices'][0]['message']['content']
+        if is_detail and len(evidence) > 6:
+            # Two-pass synthesis for detail requests with many evidence chunks
+            result = _two_pass_synthesis(
+                copilot_token, disease_name, user_prompt, context_text,
+                sorted_evidence, intent_category, detected_disease,
+                chat_history, images,
+            )
+        else:
+            result = _single_pass_synthesis(
+                copilot_token, disease_name, user_prompt,
+                sorted_evidence, is_detail, intent_category, detected_disease,
+                chat_history, images,
+            )
 
-            # Sanitize JSON in case model outputs markdown JSON blocks
-            if raw_content.startswith("```json"):
-                raw_content = raw_content[7:]
-            if raw_content.startswith("```"):
-                raw_content = raw_content[3:]
-            if raw_content.endswith("```"):
-                raw_content = raw_content[:-3]
-
-            parsed_json = json.loads(raw_content.strip())
-
-            # Migrate legacy "points" format to "markdown" if needed
-            if "sections" in parsed_json:
-                for sec in parsed_json["sections"]:
-                    if "points" in sec and "markdown" not in sec:
-                        sec["markdown"] = "\n".join(f"- {p}" for p in sec["points"])
-                        del sec["points"]
-
-                # Remove empty/placeholder sections
-                parsed_json["sections"] = [
-                    sec for sec in parsed_json["sections"]
-                    if sec.get("markdown", "").strip()
-                    and "tidak tersedia" not in sec.get("markdown", "").lower()
-                    and "belum tersedia" not in sec.get("markdown", "").lower()
-                    and sec.get("markdown", "").strip() != "-"
-                ]
-
-            # Override citations with real source names from evidence
-            real_citations = [
-                f"{item['source_name']} p.{item['page_no']}"
-                for item in evidence
-            ]
-            unique_citations: list[str] = []
-            for c in real_citations:
-                if c not in unique_citations:
-                    unique_citations.append(c)
-
-            parsed_json['citations'] = unique_citations
-            parsed_json['grounded'] = True
-            return parsed_json
+        return _postprocess_response(result, sorted_evidence)
 
     except Exception as e:
         print("Copilot API Error:", e)
@@ -280,3 +398,324 @@ def ask_copilot_adaptive(
             ],
             "grounded": False,
         }
+
+
+def _single_pass_synthesis(
+    copilot_token: str,
+    query: str,
+    user_prompt: str,
+    sorted_evidence: list[dict[str, Any]],
+    is_detail: bool,
+    intent_category: str | None,
+    disease_name: str | None,
+    chat_history: list[dict[str, Any]] | None,
+    images: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Standard single-pass LLM synthesis."""
+    system_prompt = _build_system_prompt(
+        query=query,
+        is_detail=is_detail,
+        intent_category=intent_category,
+        disease_name=disease_name,
+        evidence_count=len(sorted_evidence),
+    )
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+    if chat_history:
+        for turn in chat_history[-6:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    if images:
+        user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        _attach_images_to_content(user_content, images)
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": user_prompt})
+
+    raw = _call_copilot(copilot_token, messages)
+    return _parse_json_response(raw)
+
+
+def _two_pass_synthesis(
+    copilot_token: str,
+    query: str,
+    user_prompt: str,
+    context_text: str,
+    sorted_evidence: list[dict[str, Any]],
+    intent_category: str | None,
+    disease_name: str | None,
+    chat_history: list[dict[str, Any]] | None,
+    images: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Two-pass synthesis: first extract facts, then compose narrative."""
+    # Pass 1: Fact extraction
+    extraction_prompt = _build_extraction_prompt(len(sorted_evidence))
+    pass1_messages: list[dict[str, Any]] = [
+        {"role": "system", "content": extraction_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    raw_extraction = _call_copilot(copilot_token, pass1_messages)
+    extracted = _parse_json_response(raw_extraction)
+
+    facts_text = ""
+    for section_data in extracted.get("extracted_facts", []):
+        facts_text += f"\n### {section_data.get('section', 'General')}\n"
+        for fact in section_data.get("facts", []):
+            facts_text += f"- {fact}\n"
+
+    # Pass 2: Narrative synthesis from extracted facts + original evidence
+    system_prompt = _build_system_prompt(
+        query=query,
+        is_detail=True,
+        intent_category=intent_category,
+        disease_name=disease_name,
+        evidence_count=len(sorted_evidence),
+    )
+
+    synthesis_user = (
+        f"Query Klinis: {query}\n\n"
+        f"FAKTA TEREKSTRAK DARI EVIDENCE (gunakan ini sebagai panduan, tapi tetap rujuk evidence asli):\n"
+        f"{facts_text}\n\n"
+        f"EVIDENCE ASLI:\n{context_text}"
+    )
+
+    pass2_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+    if chat_history:
+        for turn in chat_history[-6:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                pass2_messages.append({"role": role, "content": content})
+
+    if images:
+        user_content: list[dict[str, Any]] = [{"type": "text", "text": synthesis_user}]
+        _attach_images_to_content(user_content, images)
+        pass2_messages.append({"role": "user", "content": user_content})
+    else:
+        pass2_messages.append({"role": "user", "content": synthesis_user})
+
+    raw_synthesis = _call_copilot(copilot_token, pass2_messages)
+    return _parse_json_response(raw_synthesis)
+
+
+def refine_markdown_with_instruction(
+    markdown: str,
+    instruction: str,
+    github_token: str,
+) -> str:
+    """Revise library Markdown per user instruction (Copilot). Returns full Markdown body."""
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing or empty")
+    copilot_token = get_copilot_token(github_token)
+    system = """Anda adalah editor medis. Revisi artikel Markdown yang diberikan sesuai instruksi pengguna.
+Keluaran HANYA berupa Markdown valid. Gunakan bahasa Indonesia medis formal. Jangan mengarang fakta baru."""
+    user = f"""## Artikel saat ini (Markdown)
+
+{markdown}
+
+## Instruksi revisi
+
+{instruction}
+
+Tuliskan ulang artikel lengkap dalam Markdown. Tanpa fence ```."""
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    raw = _call_copilot(copilot_token, messages)
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    return text.strip()
+
+
+def _build_mindmap_prompt(disease_name: str, competency_level: str | None) -> str:
+    """Build a comprehensive system prompt for mindmap generation from a medical article."""
+    level_note = f" (Level Kompetensi SKDI: {competency_level})" if competency_level else ""
+    return f"""Anda adalah pakar pendidikan kedokteran yang ahli dalam membuat peta konsep (mindmap) visual untuk membantu mahasiswa kedokteran belajar.
+
+TUGAS ANDA:
+Baca artikel medis tentang **{disease_name}{level_note}** yang diberikan dan bangun struktur MINDMAP KOMPREHENSIF yang kaya informasi.
+
+PRINSIP MINDMAP:
+1. **ROOT NODE** (level 0): Nama penyakit sebagai pusat. Summary berisi definisi singkat 1 kalimat.
+2. **SECTION NODES** (level 1): Setiap topik klinis utama = 1 node. Wajib ada jika tersedia:
+   - Definisi & Epidemiologi
+   - Etiologi & Faktor Risiko
+   - Patogenesis & Patofisiologi
+   - Anamnesis & Manifestasi Klinis
+   - Pemeriksaan Fisik
+   - Pemeriksaan Penunjang
+   - Diagnosis (Kriteria/Klasifikasi)
+   - Tatalaksana (Farmakologi & Non-Farmakologi)
+   - Komplikasi
+   - Prognosis & Pencegahan
+3. **CONCEPT NODES** (level 2): Setiap konsep medis penting dalam tiap section = 1 node. Contoh untuk Tatalaksana: "Lini Pertama", "Dosis Loading", "Monitoring", "Rujukan". BUAT SEBANYAK MUNGKIN konsep.
+4. **FACT NODES** (level 3): Fakta spesifik, angka, kriteria, dosis, red flags = 1 node. Contoh: "Aspirin 160 mg PO stat", "Troponin > 0.04 ng/mL", "SpO2 < 90% → oksigen".
+
+ATURAN PENTING:
+- SUMMARY setiap node WAJIB berisi informasi substantif (bukan hanya label). Minimum 1 kalimat lengkap.
+- JANGAN buat node dengan summary kosong atau hanya "lihat artikel".
+- Untuk Tatalaksana: pecah per obat/prosedur, cantumkan dosis jika ada di artikel.
+- Untuk Diagnosis: pecah per kriteria diagnostik, nilai cut-off, pemeriksaan spesifik.
+- Untuk Red Flags & Kegawatan: buat sebagai fact nodes terpisah yang menonjol.
+- ID node harus unik, lowercase, gunakan underscore. Contoh: "ttl_aspirin", "dx_kriteria_framingham".
+- JUMLAH NODE: Minimal 25 node, idealnya 40-80 node jika artikel kaya informasi.
+- EDGES: Setiap node non-root HARUS memiliki tepat 1 parent edge.
+
+FORMAT OUTPUT (RAW JSON VALID, TANPA markdown code block):
+{{
+  "disease": "{disease_name}",
+  "competency_level": "{competency_level or ''}",
+  "summary_root": "Ringkasan 2-3 kalimat tentang penyakit ini secara keseluruhan.",
+  "nodes": [
+    {{"id": "root", "label": "{disease_name}", "type": "root", "level": 0, "summary": "Definisi singkat 1 kalimat."}},
+    {{"id": "definisi", "label": "Definisi & Epidemiologi", "type": "section", "level": 1, "summary": "Ringkasan definisi dan data epidemiologi penting."}},
+    {{"id": "def_batasan", "label": "Batasan", "type": "concept", "level": 2, "summary": "Definisi klinis lengkap dari artikel."}},
+    {{"id": "def_insidens", "label": "Insidensi", "type": "fact", "level": 3, "summary": "Angka prevalensi/insidensi spesifik jika tersedia."}}
+  ],
+  "edges": [
+    {{"source": "root", "target": "definisi"}},
+    {{"source": "definisi", "target": "def_batasan"}},
+    {{"source": "def_batasan", "target": "def_insidens"}}
+  ],
+  "visual_refs": [
+    {{"image_url": "", "heading": "Judul gambar/bagan jika disebutkan di artikel", "description": "Deskripsi singkat isi visual"}}
+  ],
+  "key_takeaways": ["Poin hafalan kunci 1", "Poin hafalan kunci 2", "Poin hafalan kunci 3"]
+}}
+
+ATURAN OUTPUT:
+- Output HARUS berupa raw JSON valid (bukan markdown, bukan ```json fence).
+- Gunakan \\n untuk baris baru di dalam string JSON.
+- Semua text dalam Bahasa Indonesia medis formal.
+- Tebalkan istilah medis kunci dengan **bold** dalam summary.
+"""
+
+
+def generate_mindmap_from_article(
+    disease_name: str,
+    markdown_content: str,
+    github_token: str,
+    competency_level: str | None = None,
+    images: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Generate a comprehensive mindmap from a library article using Copilot."""
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing or empty")
+
+    copilot_token = get_copilot_token(github_token)
+    system_prompt = _build_mindmap_prompt(disease_name, competency_level)
+
+    user_content_text = (
+        f"Artikel Medis — {disease_name}:\n\n"
+        f"{markdown_content}\n\n"
+        "Bangun mindmap komprehensif berdasarkan seluruh isi artikel di atas."
+    )
+
+    if images:
+        user_content: list[dict[str, Any]] = [{"type": "text", "text": user_content_text}]
+        _attach_images_to_content(user_content, images)
+        user_msg: Any = {"role": "user", "content": user_content}
+    else:
+        user_msg = {"role": "user", "content": user_content_text}
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        user_msg,
+    ]
+
+    try:
+        raw = _call_copilot(copilot_token, messages)
+        parsed = _parse_json_response(raw)
+
+        # Ensure required fields exist
+        parsed.setdefault("disease", disease_name)
+        parsed.setdefault("competency_level", competency_level or "")
+        parsed.setdefault("nodes", [])
+        parsed.setdefault("edges", [])
+        parsed.setdefault("visual_refs", [])
+        parsed.setdefault("key_takeaways", [])
+
+        # Inject size/group values for frontend rendering
+        type_group = {"root": 0, "section": 1, "concept": 2, "fact": 3}
+        type_val = {"root": 20, "section": 12, "concept": 7, "fact": 4}
+        for node in parsed["nodes"]:
+            node["group"] = type_group.get(node.get("type", "concept"), 2)
+            node["val"] = type_val.get(node.get("type", "concept"), 5)
+
+        return parsed
+
+    except Exception as e:
+        print(f"[ERROR] Mindmap generation failed for {disease_name}: {e}")
+        return {
+            "disease": disease_name,
+            "competency_level": competency_level or "",
+            "nodes": [],
+            "edges": [],
+            "visual_refs": [],
+            "key_takeaways": [],
+            "error": str(e),
+        }
+
+
+def merge_two_markdown_articles(
+    markdown_base: str,
+    markdown_candidate: str,
+    github_token: str,
+) -> str:
+    """
+    Gabungkan artikel utama dan kandidat baru menjadi satu Markdown koheren (Copilot).
+    Menyatukan isi, mengurangi duplikasi, mempertahankan sitasi; tidak mengarang fakta baru.
+    """
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing or empty")
+    copilot_token = get_copilot_token(github_token)
+    system = """Anda adalah editor medis senior. Tugas Anda MENYATUKAN dua versi artikel Markdown tentang topik yang sama menjadi SATU artikel utuh.
+
+ATURAN:
+1. Keluaran: satu dokumen Markdown dalam bahasa Indonesia medis formal.
+2. Gabungkan isi kedua sumber secara detail; hindari pengulangan paragraf atau bullet yang redundan.
+3. Susun dengan struktur jelas (# judul penyakit/kondisi, ## subbagian sesuai materi klinis).
+4. Pertahankan referensi/sitasi dari sumber ((Sumber) ..., Hal ...), [En], atau sejenisnya.
+5. JANGAN menambahkan fakta, dosis, atau langkah yang tidak tertera di salah satu dokumen.
+6. Jika ada perbedaan antar sumber, nyatakan singkat dalam satu kalimat perbandingan bila perlu.
+7. Keluaran HANYA Markdown valid, tanpa fence ```."""
+    user = f"""## Artikel utama (saat ini)
+
+{markdown_base.strip() or "(belum ada teks; gunakan hanya kandidat)"}
+
+---
+
+## Kandidat baru (regenerate)
+
+{markdown_candidate.strip()}
+
+---
+
+Tulis SATU artikel Markdown lengkap hasil penggabungan kedua bagian di atas."""
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    raw = _call_copilot(copilot_token, messages)
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    return text.strip()

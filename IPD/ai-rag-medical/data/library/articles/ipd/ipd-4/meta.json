@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "disease_name": "Influenza",
+  "catalog_no": 4,
+  "stase_slug": "ipd",
+  "generated_at": "2026-04-16T20:50:26.025416+00:00",
+  "last_refine_instruction": null,
+  "extra_prompt": null,
+  "last_operation": "update_visual_refs",
+  "images": [],
+  "indexed_into_rag": false,
+  "indexed_checksum": null,
+  "content_checksum": "6a9f339a4c69b464e5d08d76763503e486323e785e4726b0634c50d648a58ffe",
+  "updated_at": "2026-04-16T21:11:42.183113+00:00"
+}

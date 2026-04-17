@@ -1,0 +1,292 @@
+No,Daftar Penyakit,Level Kompetensi
+,Sistem Neurologi,
+1,Demensia,2
+2,Ensefalopati,3B
+3,Insomnia,3B
+,Sistem Respirasi,
+4,Influenza,4
+5,Pertusis,4
+6,(Acute) Respiratory distress syndrome (ARDS),3B
+7,"SARS, MERS CoV",3B
+8,Flu burung/Flu babi,3B
+9,Difteria,3B
+10,COVID-19,3B
+,Laring dan Faring,
+11,Faringitis akut,4
+12,Faringitis kronik,3A
+13,Laringitis akut,4
+14,Laringitis kronik,3A
+15,Sindrom Croup,3B
+16,Karsinoma nasofaring,2
+,Trakea,
+17,Trakeitis,2
+18,Aspirasi,3A
+19,Benda asing di trakea,3A
+,Paru,
+20,Asma bronkial/ asma akut,4
+21,Status asmatikus (asma akut berat),3B
+22,Bronkitis akut,4
+23,Bronkitis kronik,3B
+24,Bronkiektasis dan bronkiektasis terinfeksi,3B
+25,"Pneumonia, bronkopneumonia",4
+26,Pneumonia komunitas,4
+27,Hospital acquired pneumonia (HAP)/Ventilator associated pneumonia,3B
+28,TB paru tanpa komplikasi,4
+29,TB paru dengan komplikasi,3A
+30,TB dengan HIV,3A
+31,Multi Drug Resistance (MDR) TB,3A
+32,TB ekstra paru,3A
+33,Emboli Paru,2
+34,Pneumothorax,3B
+35,Hematothorax,3B
+36,Efusi pleura,3A
+37,Efusi pleura masif,3B
+38,Emfisema paru,3B
+39,Emfisema subkutan,3A
+40,Empiema toraks,3A
+41,Penyakit Paru Obstruksi Kronik (PPOK) stabil,3A
+42,PPOK eksaserbasi akut,3B
+43,Atelektasis,3A
+44,Edema paru,3B
+45,Abses paru,3B
+46,Gawat napas (respiratory distress),4
+47,Gagal napas (respiratory failure),3B
+48,Mikosis paru,3A
+49,Aspirasi benda asing,3B
+50,Pneumokoniosis,3A
+51,Kanker Paru/Tumor Paru,3A
+52,Tumor Mediastinum,2
+53,Interstitial Lung Disease,2
+,Gangguan dan Kelainan pada Jantung,
+54,"Syok (septik, hipovolemik, kardiogenik, neurogenik)",3B
+55,Angina pektoris,3B
+56,Infark miokard,3B
+57,Gagal jantung akut,3B
+58,Gagal jantung kronik,3A
+59,Cardiorespiratory arrest (henti jantung paru),3B
+60,Bradikardi simtomatik,3B
+61,"Takikardi: supraventrikular, ventrikular",3B
+62,Fibrilasi atrial,3B
+63,Fibrilasi ventrikular,3B
+64,Atrial flutter,3B
+65,"Ekstra-sistol supraventrikular, ventrikular",3A
+66,Kor pulmonale akut,3B
+67,Kor pulmonale kronik,3A
+68,Spell hypoxic (Eisenmenger Syndrome),3B
+69,"Sindrom koroner akut (angina pektoris tidak stabil, infark miokard akut)",3B
+,Gangguan Aorta-Arteri,
+70,Hipertensi esensial,4
+71,Hipertensi esensial dengan penyulit,3A
+72,Hipertensi sekunder dan hipertensi pada kehamilan,3A
+73,Rujuk balik hipertensi sekunder,4
+74,Hipertensi krisis (emergensi),3B
+75,Penyakit Raynaud,2
+76,Trombosis/ tromboemboli arteri,3A
+77,Penyakit Buerger/tromboangitis obliterans,2
+78,Demam jantung reumatik,3A
+79,Iskemik tungkai akut,3B
+80,Iskemik tungkai kronik,2
+81,Peripheral artery disease,3A
+,Vena dan Pembuluh Limfe,
+82,Tromboflebitis,3A
+83,Limfangitis,3A
+84,"Varises (primer, sekunder)",3A
+85,Trombosis vena dalam,3A
+86,"Limfedema (primer, sekunder)",3A
+87,Insufisiensi vena kronik,3A
+,Mulut,
+88,Kandidiasis mulut,4
+89,"Ulkus mulut (aptosa, herpes)",4
+90,Leukoplakia,2
+91,Glositis,3A
+92,Angina Ludwig,3A
+93,Parotitis,4
+94,Karies gigi,3A
+95,Infeksi gusi,3A
+,Esofagus,
+96,Esofagitis refluks,3A
+97,Lesi korosif pada esofagus,3B
+,"Lambung, Duodenum, Jejunum, Ileum",
+98,Gastritis,4
+99,Gastroenteritis,4
+100,Refluks gastro-esofagus,4
+101,Varises esofagus,2
+102,Ulkus gaster,3A
+103,"Cholera, Giardiasis",4
+104,Tumor gaster,2
+105,Ulkus duodenum,3A
+106,Demam tifoid,4
+107,Demam tifoid dengan komplikasi,3B
+108,Perdarahan gastrointestinal,3B
+109,Malabsorbsi,3A
+110,Intoleransi makanan,4
+111,Alergi makanan,4
+112,Keracunan makanan,4
+113,Keracunan racun alam,3B
+114,Keracunan insektisida,3B
+115,Botulisme,3B
+,Infestasi Cacing dan lainnya,
+116,Penyakit cacing tambang,4
+117,Strongiloidiasis,4
+118,Askariasis,4
+119,Skistosomiasis,4
+120,Taeniasis,4
+121,Trichuriasis,4
+122,Oxyuriasis,4
+123,Pes,1
+,Hepar,
+123,Hepatitis A,4
+124,Hepatitis B,3A
+125,Rujuk balik Hepatitis B,4
+126,Hepatitis C,3A
+127,Rujuk balik Hepatitis C,4
+128,Abses hepar amuba,3A
+129,Perlemakan hepar,3A
+130,Sirosis hepatis,2
+131,Gagal hepar,2
+132,Neoplasma hepar,2
+,"Kandung Empedu, Saluran Empedu, dan Pankreas",
+124,Kolesistitis,3B
+125,"Kolelitiasis, koledokolitiasis",2
+126,Pankreatitis,3B
+127,Karsinoma pankreas,2
+,Kolon,
+128,"Divertikulosis, Divertikulitis",2
+129,Kolitis,3A
+130,"Disentri basiler, amuba",4
+131,Penyakit Crohn,1
+132,Colitis ulcerative,1
+133,Irritable Bowel Syndrome,3A
+134,"Polip, adenoma dan karsinoma kolon",2
+135,Intususepsi atau invaginasi,3B
+136,Proktitis,3A
+137,Hemoroid grade 1 dan 2,4
+138,Limfoma,2
+139,Gastrointestinal Stromal Tumor (GIST),2
+,Ginjal dan Saluran Kemih,
+140,Infeksi saluran kemih,4
+141,Glomerulonefritis akut,3A
+142,Glomerulonefritis kronik,3A
+143,Karsinoma sel renal,2
+144,Acute kidney injury,3A
+145,Penyakit ginjal kronik,3A
+146,Sindrom nefrotik,3A
+147,Kolik renal,3B
+148,Batu saluran kemih tanpa kolik,3B
+149,Pielonefritis tanpa komplikasi,4
+150,ISK bawah non komplikasi,4
+,Alat kelamin pria,
+151,Epididimitis,3A
+152,Prostatitis,3B
+153,Priapismus,3B
+154,Gonore,4
+156,Chancroid,4
+157,Orchitis,3A
+158,Uretritis gonore tanpa komplikasi,4
+159,Uretritis gonore dengan komplikasi epididimitis,3A
+160,Uretritis non-gonore tanpa komplikasi,4
+161,Uretritis non-gonore dengan komplikasi epididimitis,3A
+,Endocrine Glands,
+162,Diabetes melitus tipe 1 tanpa komplikasi,4
+163,Diabetes melitus tipe 2,4
+164,DM tipe lain (intoleransi glukosa akibat peny. lain),3A
+165,Diabetes pada kehamilan,3A
+166,Abses diabetik,3A
+167,Gangren diabetik,3A
+168,Ketoasidosis diabetikum,3B
+169,Hiperglikemi hiperosmolar non ketotik,3B
+170,Hipoglikemia ringan,4
+171,Hipoglikemia berat,3B
+172,Hipertiroid,3A
+173,Diabetes insipidus,2
+174,Hiperparatiroid,2
+175,Hipoparatiroid,2
+176,Gangguan elektrolit,2
+177,Rujuk balik hipertiroid,4
+178,Tirotoksikosis,3B
+179,Hipotiroid,3A
+180,Goiter,3A
+181,Rujuk balik goiter,4
+182,Tiroiditis,3A
+183,Cushing disease,3B
+184,Krisis adrenal,3B
+185,Addison disease,1
+186,Karsinoma tiroid,2
+187,Adenoma tiroid,2
+,Gizi dan Metabolisme,
+188,Malnutrisi energi-protein,4
+189,Defisiensi vitamin,4
+190,Defisiensi mineral,4
+191,Dislipidemia,4
+192,Hiperurisemia,4
+193,Obesitas,4
+194,Sindrom metabolik,4
+,Penyakit Darah,
+195,Anemia defisiensi besi,4
+196,Anemia makrositik,3A
+197,Anemia hemolitik,3A
+199,Anemia megaloblastik,3A
+200,Anemia pada kehamilan,3A
+201,Hemoglobinopati,2
+201,Polisitemia,2
+203,"Gangguan pembekuan darah (Trombositopenia, dll)",2
+204,Disseminated Intravascular Coagulation (DIC),2
+205,Agranulositosis,2
+206,Inkompatibilitas golongan darah,2
+207,Thalasemia,3A
+208,Imun Trombositopenia Purpura,3A
+209,Hemofilia,3A
+,Kelenjar Limfe dan Keganasan Darah,
+210,Limfadenopati,3A
+211,Limfadenitis,3A
+212,"Limfoma Non-Hodgkin, Hodgkin",1
+213,"Leukemia akut, kronis",2
+214,Multiple Myeloma,1
+,Timus,
+215,Timoma,1
+,Penyakit Infeksi,
+216,Bakteremia,3B
+217,HIV AIDS,4
+218,AIDS dengan komplikasi,3A
+219,Toxoplasmosis,3A
+220,Infeksi Herpes Simplex tipe 1 dan 2,3A
+221,"Demam dengue, Demam Berdarah Dengue",4
+222,Dengue shock syndrome,3B
+223,Malaria,4
+224,Toxoplasmosis,3A
+225,Leptospirosis (tanpa komplikasi),4
+226,Sepsis,3B
+,Penyakit Autoimun,
+227,Lupus eritematosus sistemik,3A
+228,Lupus eritematosus sistemik ringan dan remisi,4
+229,Reaksi anafilaktik,4
+230,Poliarteritis Nodusa,1
+231,Polimialgia reumatik,1
+232,Polimyositis,1
+233,Demam rematik,3A
+234,Artritis rematoid,3A
+235,Henoch Schonlein Purpura,2
+236,Artritis rematoid rujuk balik,4
+237,Artritis psoriatik,3A
+238,Artritis autoimun lainnya,2
+239,Imunodefisiensi,2
+240,Spondilitis ankilosa,2
+241,Skleroderma,2
+242,Miositis,1
+243,Vaskulitis,1
+,Tulang dan Sendi,
+244,Artritis,3A
+245,Osteoartritis,3A
+246,Artritis Gout akut,4
+247,Artritis Gout kronis,3A
+248,Artritis septik,3A
+249,Artritis lainnya,3A
+250,Osteoporosis,3A
+251,Tenosinovitis supuratif,3A
+252,Spondilitis TB,3B
+253,"Kelainan bentuk tulang belakang (kifosis, dll)",2
+254,"Spondilitis, spondiloartrosis",2
+255,Tendinitis/Bursitis,2
+256,Ulkus pada tungkai,4
+257,Ulkus dekubitus,3A
+258,TB kutis (skrofuloderma),3A

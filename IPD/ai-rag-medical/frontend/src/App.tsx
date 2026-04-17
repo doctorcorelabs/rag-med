@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -20,6 +20,7 @@ type ImageItem = {
   page_no: number;
   heading: string;
   image_url: string;
+  image_abs_path?: string;
 };
 
 // Ide 2: sections now use "markdown" string instead of "points" array
@@ -47,11 +48,62 @@ type ChatMessage =
   | { role: 'user'; content: string }
   | { role: 'bot'; data?: ApiResponse; error?: boolean; content?: string };
 
-type KGNode = { id: string; label: string; type: string; group: number; val: number };
-type KGEdge = { source: string; target: string; relation: string };
-type KnowledgeGraph = { nodes: KGNode[]; edges: KGEdge[]; disease: string };
+
+type MindmapNode = { id: string; label: string; type: string; level: number; summary: string; val: number; group: number };
+type MindmapEdge = { source: string; target: string };
+type VisualRef = { image_url: string; heading: string; description?: string };
+type MindmapData = {
+  disease: string;
+  competency_level?: string;
+  summary_root?: string;
+  nodes: MindmapNode[];
+  edges: MindmapEdge[];
+  visual_refs: VisualRef[];
+  key_takeaways?: string[];
+  not_generated?: boolean;
+  error?: string;
+};
+
+type LibraryStase = {
+  id: number;
+  slug: string;
+  display_name: string;
+  sort_order: number;
+  disease_count: number;
+  filled_count: number;
+};
+
+type LibraryDiseaseRow = {
+  id: number;
+  catalog_no: number;
+  name: string;
+  competency_level: string | null;
+  group_label: string | null;
+  stable_key: string;
+  status: string | null;
+  content_path: string | null;
+  updated_at: string | null;
+};
+
+type LibraryDiseaseDetail = {
+  disease: Record<string, unknown>;
+  markdown: string | null;
+  meta: Record<string, unknown> | null;
+  images: ImageItem[];
+};
+
+type LibraryPreviewResponse = {
+  ok: boolean;
+  markdown_base: string;
+  markdown_candidate: string;
+  markdown_combined: string;
+  preview_note: string;
+  evidence_count: number;
+};
 
 const API_URL = 'http://127.0.0.1:8010';
+
+type ActiveView = 'chat' | 'library' | 'kg' | 'analytics';
 
 // Section icon mapping
 const SECTION_ICONS: Record<string, string> = {
@@ -64,19 +116,6 @@ const SECTION_ICONS: Record<string, string> = {
   'Ringkasan Klinis': 'summarize',
 };
 
-// Node color mapping for knowledge graph
-const NODE_GROUP_COLORS: Record<number, string> = {
-  0: '#6366f1', // disease – indigo
-  1: '#06b6d4', // Definisi – cyan
-  2: '#f59e0b', // Etiologi – amber
-  3: '#ef4444', // Manifestasi – red
-  4: '#8b5cf6', // Diagnosis – violet
-  5: '#10b981', // Tatalaksana – emerald
-  6: '#f97316', // Komplikasi – orange
-  7: '#64748b', // Prognosis – slate
-  8: '#a78bfa', // Ringkasan – light violet
-  9: '#94a3b8', // concept – gray
-};
 
 // ─── MARKDOWN COMPONENTS ────────────────────────────────────────────────────
 const mdComponents = {
@@ -113,127 +152,1515 @@ const mdComponents = {
   ),
 };
 
-// ─── KNOWLEDGE GRAPH MODAL ───────────────────────────────────────────────────
-function KnowledgeGraphModal({ disease, onClose }: { disease: string; onClose: () => void }) {
-  const [graphData, setGraphData] = useState<KnowledgeGraph | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+
+// ─── KNOWLEDGE GRAPH PANEL ───────────────────────────────────────────────────
+const NODE_TYPE_OPTIONS = ['root', 'section', 'concept', 'fact'] as const;
+type NodeType = typeof NODE_TYPE_OPTIONS[number];
+
+function drawMindmapNode(
+  node: any,
+  ctx: CanvasRenderingContext2D,
+  globalScale: number,
+  isActive: boolean,
+) {
+  const nx = node.x as number;
+  const ny = node.y as number;
+  const isRoot = node.type === 'root';
+  const isSection = node.type === 'section';
+  const isConcept = node.type === 'concept';
+
+  const baseFontSize = isRoot ? 13 : isSection ? 10.5 : isConcept ? 9 : 8.5;
+  const fs = Math.max(baseFontSize / globalScale, 2.5);
+  ctx.font = `${isRoot || isSection ? '700' : '500'} ${fs}px Inter,sans-serif`;
+
+  const rawLabel = node.label as string;
+  const maxLineW = (isRoot ? 108 : isSection ? 88 : 76) / globalScale;
+  const wrappedLines: string[] = [];
+  let cur = '';
+  for (const w of rawLabel.split(' ')) {
+    const t = cur ? `${cur} ${w}` : w;
+    if (ctx.measureText(t).width > maxLineW && cur) { wrappedLines.push(cur); cur = w; }
+    else cur = t;
+  }
+  if (cur) wrappedLines.push(cur);
+
+  const lh = fs * 1.4;
+  const padX = (isRoot ? 14 : 10) / globalScale;
+  const padY = (isRoot ? 10 : 7) / globalScale;
+  const longestW = Math.max(...wrappedLines.map(l => ctx.measureText(l).width));
+  const bw = longestW + padX * 2;
+  const bh = wrappedLines.length * lh + padY * 2;
+  const bx = nx - bw / 2;
+  const by = ny - bh / 2;
+  const r = isRoot ? Math.min(bh * 0.45, 12 / globalScale) : Math.min(6 / globalScale, bh * 0.35);
+
+  const fillColors: Record<string, string> = { root: '#6366f1', section: '#0ea5e9', concept: '#d1fae5', fact: '#fef3c7' };
+  const textColors: Record<string, string> = { root: '#ffffff', section: '#ffffff', concept: '#065f46', fact: '#92400e' };
+  const borderColors: Record<string, string> = { root: '#4338ca', section: '#0369a1', concept: '#10b981', fact: '#f59e0b' };
+
+  if (isRoot || isSection) {
+    ctx.save();
+    ctx.shadowColor = isRoot ? 'rgba(99,102,241,0.4)' : 'rgba(14,165,233,0.3)';
+    ctx.shadowBlur = (isRoot ? 14 : 8) / globalScale;
+  }
+
+  const rr = (x: number, y: number, w: number, h: number, rad: number) => {
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  };
+
+  rr(bx, by, bw, bh, r);
+  ctx.fillStyle = fillColors[node.type] ?? '#e2e8f0';
+  ctx.fill();
+  ctx.strokeStyle = isActive ? '#f43f5e' : (borderColors[node.type] ?? '#94a3b8');
+  ctx.lineWidth = (isActive ? 3 : isRoot ? 2.5 : 1.5) / globalScale;
+  ctx.stroke();
+
+  if (isRoot || isSection) ctx.restore();
+
+  ctx.fillStyle = textColors[node.type] ?? '#1e293b';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const textY0 = ny - (wrappedLines.length - 1) * lh / 2;
+  wrappedLines.forEach((line, i) => ctx.fillText(line, nx, textY0 + i * lh));
+
+  node.__bw = bw;
+  node.__bh = bh;
+}
+
+function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDisease?: string | null; onDismissInitial?: () => void }) {
+  const [stases, setStases] = useState<LibraryStase[]>([]);
+  const [staseSlug, setStaseSlug] = useState('ipd');
+  const [diseases, setDiseases] = useState<LibraryDiseaseRow[]>([]);
+  const [search, setSearch] = useState('');
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [localMindmap, setLocalMindmap] = useState<MindmapData | null>(null);
+  const [loadingMindmap, setLoadingMindmap] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const [hasUnsaved, setHasUnsaved] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [activeNode, setActiveNode] = useState<MindmapNode | null>(null);
+  const [editLabel, setEditLabel] = useState('');
+  const [editSummary, setEditSummary] = useState('');
+  const [editType, setEditType] = useState<NodeType>('concept');
+  const [showVisuals, setShowVisuals] = useState(false);
+  const [graphKey, setGraphKey] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 800, height: 500 });
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const graphRef = useRef<any>(null);
 
   useEffect(() => {
-    if (containerRef.current) {
-      const { offsetWidth, offsetHeight } = containerRef.current;
-      setDimensions({ width: offsetWidth || 800, height: offsetHeight || 500 });
-    }
+    axios.get<{ stases: LibraryStase[] }>(`${API_URL}/library/stases`)
+      .then((r) => setStases(r.data.stases || []))
+      .catch(() => setStases([]));
   }, []);
 
   useEffect(() => {
-    setIsLoading(true);
-    axios.get<KnowledgeGraph>(`${API_URL}/knowledge_graph/${encodeURIComponent(disease)}`)
-      .then((res) => setGraphData(res.data))
-      .catch((err) => setError(`Gagal memuat graph: ${err.message}`))
-      .finally(() => setIsLoading(false));
-  }, [disease]);
+    setLoadingList(true);
+    axios.get(`${API_URL}/library/stases/${staseSlug}/diseases`)
+      .then((r) => setDiseases(r.data.diseases || []))
+      .catch(() => setDiseases([]))
+      .finally(() => setLoadingList(false));
+  }, [staseSlug]);
 
-  const graphStructure = graphData
-    ? {
-        nodes: graphData.nodes,
-        links: graphData.edges.map((e) => ({ source: e.source, target: e.target, relation: e.relation })),
+  useEffect(() => {
+    if (!initialDisease || diseases.length === 0) return;
+    const name = initialDisease.toLowerCase();
+    const match = diseases.find((d) => d.name.toLowerCase().includes(name) || name.includes(d.name.toLowerCase()));
+    if (match) { handleSelectDisease(match); onDismissInitial?.(); }
+  }, [initialDisease, diseases]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const obs = new ResizeObserver(() => {
+      if (containerRef.current)
+        setDimensions({ width: containerRef.current.offsetWidth, height: containerRef.current.offsetHeight });
+    });
+    obs.observe(containerRef.current);
+    setDimensions({ width: containerRef.current.offsetWidth, height: containerRef.current.offsetHeight });
+    return () => obs.disconnect();
+  }, []);
+
+  const handleSelectDisease = async (disease: LibraryDiseaseRow) => {
+    if (!disease.status || disease.status === 'missing') return;
+    setSelectedId(disease.id);
+    setLocalMindmap(null);
+    setActiveNode(null);
+    setEditMode(false);
+    setHasUnsaved(false);
+    setLoadingMindmap(true);
+    try {
+      const r = await axios.get<MindmapData>(`${API_URL}/library/stases/${staseSlug}/diseases/${disease.id}/mindmap`);
+      setLocalMindmap(r.data);
+    } catch (e: any) {
+      setLocalMindmap({ disease: disease.name, nodes: [], edges: [], visual_refs: [], error: e?.message });
+    } finally {
+      setLoadingMindmap(false);
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!selectedId) return;
+    setGenerating(true);
+    setActiveNode(null);
+    try {
+      const r = await axios.post<MindmapData>(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/mindmap/generate`);
+      setLocalMindmap(r.data);
+      setHasUnsaved(false);
+      setGraphKey(k => k + 1);
+    } catch (e: any) {
+      setSaveMsg(`Generate gagal: ${e?.response?.data?.detail ?? e.message}`);
+      setTimeout(() => setSaveMsg(null), 4000);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!selectedId || !localMindmap) return;
+    setSaving(true);
+    try {
+      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/mindmap`, {
+        nodes: localMindmap.nodes,
+        edges: localMindmap.edges,
+        visual_refs: localMindmap.visual_refs ?? [],
+        key_takeaways: localMindmap.key_takeaways ?? [],
+        summary_root: localMindmap.summary_root ?? '',
+      });
+      setHasUnsaved(false);
+      setSaveMsg('Tersimpan');
+      setTimeout(() => setSaveMsg(null), 2500);
+    } catch {
+      setSaveMsg('Gagal menyimpan');
+      setTimeout(() => setSaveMsg(null), 3000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Edit helpers ───────────────────────────────────────────────────────────
+  const openEditForNode = (node: MindmapNode) => {
+    setActiveNode(node);
+    setEditLabel(node.label);
+    setEditSummary(node.summary);
+    setEditType(node.type as NodeType);
+  };
+
+  const handleNodeClick = (node: any) => {
+    if (editMode) openEditForNode(node as MindmapNode);
+    else setActiveNode(node as MindmapNode);
+  };
+
+  const typeGroupVal: Record<NodeType, { group: number; val: number }> = {
+    root: { group: 0, val: 20 }, section: { group: 1, val: 12 },
+    concept: { group: 2, val: 7 }, fact: { group: 3, val: 4 },
+  };
+
+  const applyNodeEdit = () => {
+    if (!activeNode || !localMindmap) return;
+    const tv = typeGroupVal[editType];
+    setLocalMindmap(prev => prev ? {
+      ...prev,
+      nodes: prev.nodes.map(n => n.id === activeNode.id
+        ? { ...n, label: editLabel.trim() || n.label, summary: editSummary, type: editType, group: tv.group, val: tv.val }
+        : n),
+    } : prev);
+    setHasUnsaved(true);
+    setActiveNode(null);
+  };
+
+  const handleDeleteNode = (nodeId: string) => {
+    if (!localMindmap) return;
+    if (!window.confirm('Hapus node ini? Edge yang terhubung juga akan dihapus.')) return;
+    // Collect all descendant IDs recursively
+    const toRemove = new Set<string>([nodeId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const e of localMindmap.edges) {
+        if (toRemove.has(e.source) && !toRemove.has(e.target)) {
+          toRemove.add(e.target); changed = true;
+        }
       }
-    : { nodes: [], links: [] };
+    }
+    setLocalMindmap(prev => prev ? {
+      ...prev,
+      nodes: prev.nodes.filter(n => !toRemove.has(n.id)),
+      edges: prev.edges.filter(e => !toRemove.has(e.source) && !toRemove.has(e.target)),
+    } : prev);
+    setHasUnsaved(true);
+    setGraphKey(k => k + 1);
+    setActiveNode(null);
+  };
+
+  const handleAddChild = (parentId: string) => {
+    if (!localMindmap) return;
+    const parent = localMindmap.nodes.find(n => n.id === parentId);
+    if (!parent) return;
+    const childLevel = Math.min((parent.level ?? 0) + 1, 3);
+    const childType: NodeType = childLevel === 1 ? 'section' : childLevel === 2 ? 'concept' : 'fact';
+    const tv = typeGroupVal[childType];
+    const newId = `custom_${Date.now()}`;
+    const newNode: MindmapNode = {
+      id: newId, label: 'Node Baru', summary: '', type: childType,
+      level: childLevel, group: tv.group, val: tv.val,
+    };
+    setLocalMindmap(prev => prev ? {
+      ...prev,
+      nodes: [...prev.nodes, newNode],
+      edges: [...prev.edges, { source: parentId, target: newId }],
+    } : prev);
+    setHasUnsaved(true);
+    setGraphKey(k => k + 1);
+    // Open edit panel for new node immediately
+    setTimeout(() => openEditForNode(newNode), 50);
+  };
+
+  // ── Derived data ───────────────────────────────────────────────────────────
+  const filtered = useMemo(() => {
+    if (!search.trim()) return diseases;
+    const q = search.toLowerCase();
+    return diseases.filter((d) => d.name.toLowerCase().includes(q) || String(d.catalog_no).includes(q));
+  }, [diseases, search]);
+
+  const grouped = useMemo(() => {
+    const m = new Map<string, LibraryDiseaseRow[]>();
+    for (const d of filtered) {
+      const g = d.group_label || 'Umum';
+      if (!m.has(g)) m.set(g, []);
+      m.get(g)!.push(d);
+    }
+    return m;
+  }, [filtered]);
+
+  const graphData = useMemo(() => {
+    if (!localMindmap || localMindmap.nodes.length === 0) return { nodes: [], links: [] };
+    return {
+      nodes: localMindmap.nodes,
+      links: localMindmap.edges.map(e => ({ source: e.source, target: e.target })),
+    };
+  }, [localMindmap]);
+
+  const hasGraph = localMindmap && !localMindmap.not_generated && localMindmap.nodes.length > 0;
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div
-        className="bg-white dark:bg-slate-900 rounded-[2rem] w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl border border-white/20 overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-slate-100 dark:border-slate-800">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
-              <span className="material-symbols-outlined text-white text-[20px]">hub</span>
-            </div>
-            <div>
-              <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100">
-                Knowledge Graph
-              </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Peta relasi konsep: <span className="text-indigo-600 font-semibold">{disease}</span></p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors">
-            <span className="material-symbols-outlined">close</span>
-          </button>
+    <div className="flex-1 flex min-h-0 overflow-hidden">
+      {/* ── Left: Disease List ── */}
+      <div className="w-72 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/60">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800">
+          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-1.5">Stase</p>
+          <select
+            value={staseSlug}
+            onChange={(e) => { setStaseSlug(e.target.value); setSelectedId(null); setLocalMindmap(null); }}
+            className="w-full text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          >
+            {stases.map((s) => <option key={s.slug} value={s.slug}>{s.display_name}</option>)}
+            {stases.length === 0 && <option value="ipd">Stase IPD</option>}
+          </select>
         </div>
-
-        {/* Legend */}
-        <div className="px-5 py-2 flex flex-wrap gap-2 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
-          {[
-            { label: 'Penyakit', color: '#6366f1' },
-            { label: 'Definisi', color: '#06b6d4' },
-            { label: 'Etiologi', color: '#f59e0b' },
-            { label: 'Manifestasi', color: '#ef4444' },
-            { label: 'Diagnosis', color: '#8b5cf6' },
-            { label: 'Tatalaksana', color: '#10b981' },
-            { label: 'Komplikasi', color: '#f97316' },
-          ].map((item) => (
-            <div key={item.label} className="flex items-center gap-1.5">
-              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }} />
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">{item.label}</span>
+        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2">
+            <span className="material-symbols-outlined text-slate-400 text-[16px]">search</span>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari penyakit..."
+              className="flex-1 text-sm bg-transparent text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none" />
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto py-2">
+          {loadingList ? (
+            <div className="flex items-center justify-center h-20">
+              <div className="w-5 h-5 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
+            </div>
+          ) : Array.from(grouped.entries()).map(([group, rows]) => (
+            <div key={group} className="mb-1">
+              <p className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest">{group}</p>
+              {rows.map((d) => {
+                const hasArticle = d.status && d.status !== 'missing';
+                const isSelected = selectedId === d.id;
+                const hasMindmap = isSelected && localMindmap && !localMindmap.not_generated && localMindmap.nodes.length > 0;
+                return (
+                  <button key={d.id} onClick={() => handleSelectDisease(d)} disabled={!hasArticle}
+                    className={`w-full text-left px-4 py-2.5 flex items-center gap-2.5 transition-all ${
+                      isSelected ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
+                      : hasArticle ? 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800/50'
+                      : 'text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
+                    }`}
+                  >
+                    <span className={`shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${isSelected ? 'border-indigo-500 bg-indigo-500' : hasArticle ? 'border-slate-300' : 'border-slate-200'}`}>
+                      {isSelected && <span className="w-1.5 h-1.5 bg-white rounded-full" />}
+                    </span>
+                    <span className="flex-1 text-xs leading-snug line-clamp-2">
+                      <span className="text-slate-400 mr-1">#{d.catalog_no}</span>{d.name}
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {hasMindmap && <span className="material-symbols-outlined text-[11px] text-indigo-400" title="Mindmap tersedia">account_tree</span>}
+                      {d.competency_level && (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                          d.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
+                          d.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
+                        }`}>{d.competency_level}</span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           ))}
         </div>
-
-        {/* Graph Canvas */}
-        <div className="flex-1 relative" ref={containerRef}>
-          {isLoading && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-              <div className="w-10 h-10 rounded-full border-2 border-indigo-200 border-t-indigo-600 animate-spin" />
-              <p className="text-sm text-slate-500">Membangun grafik relasi...</p>
-            </div>
-          )}
-          {error && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <p className="text-sm text-red-500">{error}</p>
-            </div>
-          )}
-          {!isLoading && !error && graphData && graphData.nodes.length === 0 && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 opacity-60">
-              <span className="material-symbols-outlined text-5xl text-slate-300">lan</span>
-              <p className="text-sm text-slate-400">Belum ada data graph. Rebuild index terlebih dahulu.</p>
-            </div>
-          )}
-          {!isLoading && !error && graphData && graphData.nodes.length > 0 && (
-            <ForceGraph2D
-              graphData={graphStructure as any}
-              width={dimensions.width}
-              height={dimensions.height}
-              nodeLabel={(node: any) => node.label}
-              nodeColor={(node: any) => NODE_GROUP_COLORS[node.group] ?? '#94a3b8'}
-              nodeVal={(node: any) => node.val ?? 6}
-              linkLabel={(link: any) => link.relation}
-              linkColor={() => 'rgba(148,163,184,0.4)'}
-              linkDirectionalArrowLength={4}
-              linkDirectionalArrowRelPos={1}
-              linkDirectionalParticles={1}
-              linkDirectionalParticleSpeed={0.004}
-              enableNodeDrag
-              cooldownTicks={80}
-              nodeCanvasObjectMode={() => 'after'}
-              nodeCanvasObject={(node: any, ctx, globalScale) => {
-                const label = node.label as string;
-                const fontSize = Math.max(10 / globalScale, 3);
-                ctx.font = `${fontSize}px Inter, sans-serif`;
-                ctx.fillStyle = '#334155';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(label.length > 20 ? label.slice(0, 20) + '…' : label, node.x, (node.y as number) + (node.val ?? 6) + fontSize + 1);
-              }}
-            />
-          )}
-        </div>
       </div>
+
+      {/* ── Right: Mindmap Canvas ── */}
+      <div className="flex-1 flex flex-col min-w-0">
+
+        {/* Empty: nothing selected */}
+        {!selectedId && !loadingMindmap && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center p-8 opacity-60">
+            <span className="material-symbols-outlined text-6xl text-slate-300">account_tree</span>
+            <div>
+              <p className="font-semibold text-slate-500 mb-1">Pilih Penyakit</p>
+              <p className="text-sm text-slate-400">Pilih penyakit yang sudah memiliki artikel di Medical Library.</p>
+            </div>
+          </div>
+        )}
+
+        {/* Loading mindmap from server */}
+        {loadingMindmap && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3">
+            <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+            <p className="text-sm text-slate-500">Memuat mindmap...</p>
+          </div>
+        )}
+
+        {/* Generating via Copilot */}
+        {generating && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-4">
+            <div className="w-12 h-12 border-2 border-violet-200 border-t-violet-600 rounded-full animate-spin" />
+            <div className="text-center">
+              <p className="font-semibold text-slate-600 dark:text-slate-300">Copilot sedang membangun mindmap...</p>
+              <p className="text-sm text-slate-400 mt-1">Membaca artikel & menyusun node secara sistematis</p>
+            </div>
+          </div>
+        )}
+
+        {/* Not generated yet */}
+        {selectedId && !loadingMindmap && !generating && localMindmap?.not_generated && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-5 p-8">
+            <span className="material-symbols-outlined text-6xl text-slate-200">hub</span>
+            <div className="text-center max-w-sm">
+              <p className="font-semibold text-slate-600 dark:text-slate-300 mb-1">Mindmap belum dibuat</p>
+              <p className="text-sm text-slate-400 leading-relaxed">Klik tombol di bawah untuk membuat mindmap otomatis menggunakan Copilot dari artikel Medical Library.</p>
+            </div>
+            <button onClick={handleGenerate}
+              className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 transition-all font-semibold shadow-lg shadow-indigo-200">
+              <span className="material-symbols-outlined text-[20px]">auto_awesome</span>
+              Generate Mindmap
+            </button>
+          </div>
+        )}
+
+        {/* Mindmap loaded */}
+        {selectedId && !loadingMindmap && !generating && hasGraph && (
+          <>
+            {/* Header */}
+            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-3 shrink-0 flex-wrap">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-base font-headline font-bold text-slate-800 dark:text-slate-100 truncate">{localMindmap!.disease}</h2>
+                  {localMindmap!.competency_level && (
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                      localMindmap!.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
+                      localMindmap!.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
+                    }`}>Level {localMindmap!.competency_level}</span>
+                  )}
+                  <span className="text-[10px] text-slate-400">{localMindmap!.nodes.length} node</span>
+                  {hasUnsaved && <span className="text-[10px] text-amber-500 font-medium">● Belum disimpan</span>}
+                  {saveMsg && <span className={`text-[10px] font-medium ${saveMsg === 'Tersimpan' ? 'text-emerald-500' : 'text-red-500'}`}>{saveMsg}</span>}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                {(localMindmap!.visual_refs?.length ?? 0) > 0 && (
+                  <button onClick={() => setShowVisuals(!showVisuals)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-amber-50 text-amber-600 border border-amber-100 rounded-full hover:bg-amber-100 transition-all">
+                    <span className="material-symbols-outlined text-[13px]">imagesmode</span>
+                    {localMindmap!.visual_refs!.length} Visual
+                  </button>
+                )}
+                {/* Edit Mode Toggle */}
+                <button
+                  onClick={() => { setEditMode(m => !m); setActiveNode(null); }}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] rounded-full border transition-all font-medium ${
+                    editMode ? 'bg-rose-500 text-white border-rose-600 shadow-sm' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[13px]">{editMode ? 'edit_off' : 'edit'}</span>
+                  {editMode ? 'Edit ON' : 'Edit'}
+                </button>
+                {/* Save */}
+                {hasUnsaved && (
+                  <button onClick={handleSave} disabled={saving}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-all font-medium disabled:opacity-60">
+                    <span className="material-symbols-outlined text-[13px]">{saving ? 'sync' : 'save'}</span>
+                    {saving ? 'Menyimpan...' : 'Simpan'}
+                  </button>
+                )}
+                {/* Regenerate */}
+                <button onClick={() => { if (window.confirm('Regenerate mindmap? Data node yang sudah diedit akan ditimpa.')) handleGenerate(); }}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-violet-50 text-violet-600 border border-violet-100 rounded-full hover:bg-violet-100 transition-all">
+                  <span className="material-symbols-outlined text-[13px]">auto_awesome</span>
+                  Regenerate
+                </button>
+              </div>
+            </div>
+
+            {/* Visual Refs Strip */}
+            {showVisuals && (localMindmap!.visual_refs?.length ?? 0) > 0 && (
+              <div className="px-5 py-3 border-b border-slate-100 dark:border-slate-800 bg-amber-50/60 flex gap-4 overflow-x-auto shrink-0">
+                {localMindmap!.visual_refs!.map((vref, i) => (
+                  <div key={i} className="shrink-0 flex flex-col items-center gap-1">
+                    {vref.image_url ? (
+                      <img src={`${API_URL}${vref.image_url}`} alt={vref.heading}
+                        className="h-24 w-auto rounded-lg border border-amber-100 object-cover"
+                        onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                    ) : (
+                      <div className="h-24 w-28 bg-amber-100 rounded-lg flex items-center justify-center">
+                        <span className="material-symbols-outlined text-amber-400">image</span>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-center text-amber-700 font-medium max-w-[7rem] line-clamp-2">{vref.heading}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Legend + edit hint */}
+            <div className="px-5 py-1.5 border-b border-slate-100 dark:border-slate-800 flex flex-wrap gap-2 items-center shrink-0 bg-white/50 dark:bg-slate-900/50">
+              {[
+                { label: 'Root', bg: '#6366f1', text: '#fff', border: '#4338ca' },
+                { label: 'Section', bg: '#0ea5e9', text: '#fff', border: '#0369a1' },
+                { label: 'Konsep', bg: '#d1fae5', text: '#065f46', border: '#10b981' },
+                { label: 'Fakta', bg: '#fef3c7', text: '#92400e', border: '#f59e0b' },
+              ].map(item => (
+                <div key={item.label} className="flex items-center">
+                  <div className="px-1.5 py-0.5 rounded text-[9px] font-semibold border" style={{ backgroundColor: item.bg, color: item.text, borderColor: item.border }}>{item.label}</div>
+                </div>
+              ))}
+              <span className="text-[10px] text-slate-400 ml-auto">
+                {editMode ? '✏️ Klik node untuk edit · Klik canvas kosong untuk deselect' : 'Klik node untuk ringkasan · Scroll zoom'}
+              </span>
+            </div>
+
+            {/* Canvas + edit panel */}
+            <div className="flex-1 flex min-h-0 relative overflow-hidden">
+              {/* Canvas */}
+              <div className="flex-1 relative" ref={containerRef} onClick={(e) => { if ((e.target as HTMLElement).tagName === 'CANVAS') setActiveNode(null); }}>
+                <ForceGraph2D
+                  key={graphKey}
+                  ref={graphRef}
+                  graphData={graphData as any}
+                  width={dimensions.width - (editMode && activeNode ? 300 : 0)}
+                  height={dimensions.height}
+                  dagMode="radialout"
+                  dagLevelDistance={110}
+                  nodeRelSize={1}
+                  nodeVal={(node: any) => {
+                    const t = node.type;
+                    return t === 'root' ? 60 : t === 'section' ? 28 : t === 'concept' ? 18 : 12;
+                  }}
+                  linkColor={() => 'rgba(148,163,184,0.45)'}
+                  linkWidth={1.4}
+                  linkCurvature={0.25}
+                  linkDirectionalArrowLength={5}
+                  linkDirectionalArrowRelPos={1}
+                  enableNodeDrag
+                  cooldownTicks={150}
+                  d3AlphaDecay={0.02}
+                  d3VelocityDecay={0.3}
+                  onNodeClick={handleNodeClick}
+                  nodeCanvasObjectMode={() => 'replace' as const}
+                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) =>
+                    drawMindmapNode(node, ctx, globalScale, activeNode?.id === node.id)
+                  }
+                  nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
+                    ctx.fillStyle = color;
+                    ctx.fillRect((node.x as number) - ((node.__bw as number) ?? 60) / 2, (node.y as number) - ((node.__bh as number) ?? 22) / 2, (node.__bw as number) ?? 60, (node.__bh as number) ?? 22);
+                  }}
+                />
+
+                {/* View mode popup */}
+                {!editMode && activeNode && (
+                  <div className="absolute bottom-4 right-4 max-w-xs bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-4 z-10">
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <span className={`text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded border ${
+                        activeNode.type === 'root' ? 'bg-indigo-600 text-white border-indigo-700' :
+                        activeNode.type === 'section' ? 'bg-sky-500 text-white border-sky-600' :
+                        activeNode.type === 'concept' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' :
+                        'bg-amber-50 text-amber-700 border-amber-300'
+                      }`}>{activeNode.type}</span>
+                      <button onClick={() => setActiveNode(null)} className="text-slate-400 hover:text-slate-600 shrink-0">
+                        <span className="material-symbols-outlined text-[16px]">close</span>
+                      </button>
+                    </div>
+                    <p className="font-headline font-bold text-slate-800 dark:text-slate-100 mb-2 leading-snug">{activeNode.label}</p>
+                    <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{activeNode.summary}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Edit Panel (slide in from right) */}
+              {editMode && activeNode && (
+                <div className="w-72 shrink-0 border-l border-rose-100 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col shadow-xl z-20 overflow-y-auto">
+                  {/* Panel header */}
+                  <div className="px-4 py-3 border-b border-rose-100 dark:border-slate-800 flex items-center justify-between shrink-0 bg-rose-50 dark:bg-rose-900/20">
+                    <div className="flex items-center gap-2">
+                      <span className="material-symbols-outlined text-rose-500 text-[18px]">edit_note</span>
+                      <span className="text-sm font-semibold text-rose-700 dark:text-rose-400">Edit Node</span>
+                    </div>
+                    <button onClick={() => setActiveNode(null)} className="text-rose-400 hover:text-rose-600">
+                      <span className="material-symbols-outlined text-[16px]">close</span>
+                    </button>
+                  </div>
+
+                  <div className="flex-1 p-4 flex flex-col gap-4">
+                    {/* Type selector */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Tipe Node</label>
+                      <div className="flex gap-1.5 flex-wrap">
+                        {NODE_TYPE_OPTIONS.map(t => (
+                          <button key={t} onClick={() => setEditType(t)}
+                            className={`text-[10px] font-bold px-2.5 py-1 rounded-lg border transition-all ${editType === t
+                              ? t === 'root' ? 'bg-indigo-600 text-white border-indigo-700'
+                              : t === 'section' ? 'bg-sky-500 text-white border-sky-600'
+                              : t === 'concept' ? 'bg-emerald-500 text-white border-emerald-600'
+                              : 'bg-amber-400 text-white border-amber-500'
+                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:border-slate-300'
+                            }`}
+                          >{t}</button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Label */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Label Node</label>
+                      <input
+                        value={editLabel}
+                        onChange={(e) => setEditLabel(e.target.value)}
+                        className="w-full text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-rose-300"
+                        placeholder="Nama node..."
+                      />
+                    </div>
+
+                    {/* Summary / Note */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Catatan / Ringkasan</label>
+                      <textarea
+                        value={editSummary}
+                        onChange={(e) => setEditSummary(e.target.value)}
+                        rows={6}
+                        className="w-full text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-rose-300 resize-none leading-relaxed"
+                        placeholder="Tulis ringkasan atau catatan belajar..."
+                      />
+                    </div>
+
+                    {/* Apply edits */}
+                    <button onClick={applyNodeEdit}
+                      className="w-full py-2.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-[16px]">check</span>
+                      Terapkan Perubahan
+                    </button>
+
+                    <div className="border-t border-slate-100 dark:border-slate-800 pt-3 flex flex-col gap-2">
+                      {/* Add child */}
+                      <button onClick={() => handleAddChild(activeNode.id)}
+                        className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-[15px]">add_circle</span>
+                        Tambah Node Anak
+                      </button>
+                      {/* Delete */}
+                      {activeNode.type !== 'root' && (
+                        <button onClick={() => handleDeleteNode(activeNode.id)}
+                          className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                          <span className="material-symbols-outlined text-[15px]">delete</span>
+                          Hapus Node & Anak
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Key Takeaways */}
+            {(localMindmap!.key_takeaways?.length ?? 0) > 0 && (
+              <div className="shrink-0 border-t border-slate-100 dark:border-slate-800 px-5 py-2.5 bg-violet-50/50 dark:bg-violet-900/10 flex items-start gap-2 flex-wrap">
+                <span className="material-symbols-outlined text-violet-400 text-[14px] mt-0.5">stars</span>
+                {localMindmap!.key_takeaways!.map((t, i) => (
+                  <span key={i} className="text-xs bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 px-2.5 py-1 rounded-full border border-violet-100">{t}</span>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── MEDICAL LIBRARY PANEL ───────────────────────────────────────────────────
+function MedicalLibraryPanel({ components }: { components: typeof mdComponents }) {
+  const [stases, setStases] = useState<LibraryStase[]>([]);
+  const [staseSlug, setStaseSlug] = useState('ipd');
+  const [diseases, setDiseases] = useState<LibraryDiseaseRow[]>([]);
+  const [progress, setProgress] = useState({ filled: 0, total: 0, percent: 0 });
+  const [search, setSearch] = useState('');
+  const [onlyMissing, setOnlyMissing] = useState(false);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<LibraryDiseaseDetail | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [extraPrompt, setExtraPrompt] = useState('');
+  const [refineOpen, setRefineOpen] = useState(false);
+  const [refineText, setRefineText] = useState('');
+  const [editOpen, setEditOpen] = useState(false);
+  const [editMarkdown, setEditMarkdown] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [combineWithExisting, setCombineWithExisting] = useState(false);
+  const [combineMode, setCombineMode] = useState<'append' | 'replace'>('replace');
+  const [previewBase, setPreviewBase] = useState('');
+  const [previewCandidate, setPreviewCandidate] = useState('');
+  const [previewCombinedEdit, setPreviewCombinedEdit] = useState('');
+  const [previewNote, setPreviewNote] = useState('');
+  const [mergeAiLoading, setMergeAiLoading] = useState(false);
+  const [visualOpen, setVisualOpen] = useState(false);
+  const [visualBusy, setVisualBusy] = useState(false);
+  const [visualSuggestions, setVisualSuggestions] = useState<ImageItem[]>([]);
+  const [visualSelected, setVisualSelected] = useState<ImageItem[]>([]);
+
+  useEffect(() => {
+    axios
+      .get<{ stases: LibraryStase[] }>(`${API_URL}/library/stases`)
+      .then((r) => setStases(r.data.stases || []))
+      .catch(() => setStases([]));
+  }, []);
+
+  const loadDiseases = useCallback(async () => {
+    setLoadingList(true);
+    setErr(null);
+    try {
+      const r = await axios.get(`${API_URL}/library/stases/${staseSlug}/diseases`);
+      setDiseases(r.data.diseases || []);
+      setProgress(r.data.progress || { filled: 0, total: 0, percent: 0 });
+    } catch (e) {
+      setErr('Gagal memuat daftar penyakit. Pastikan API berjalan.');
+    } finally {
+      setLoadingList(false);
+    }
+  }, [staseSlug]);
+
+  useEffect(() => {
+    void loadDiseases();
+  }, [loadDiseases]);
+
+  const loadDetail = useCallback(
+    async (id: number) => {
+      setLoadingDetail(true);
+      setSelectedId(id);
+      setErr(null);
+      try {
+        const r = await axios.get<LibraryDiseaseDetail>(`${API_URL}/library/stases/${staseSlug}/diseases/${id}`);
+        setDetail(r.data);
+        setEditMarkdown(r.data.markdown || '');
+      } catch {
+        setDetail(null);
+        setErr('Gagal memuat detail penyakit.');
+      } finally {
+        setLoadingDetail(false);
+      }
+    },
+    [staseSlug]
+  );
+
+  const filtered = useMemo(() => {
+    let rows = diseases;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      rows = rows.filter((d) => d.name.toLowerCase().includes(q) || String(d.catalog_no).includes(q));
+    }
+    if (onlyMissing) {
+      rows = rows.filter((d) => !d.status || d.status === 'missing');
+    }
+    return rows;
+  }, [diseases, search, onlyMissing]);
+
+  const grouped = useMemo(() => {
+    const m = new Map<string, LibraryDiseaseRow[]>();
+    for (const d of filtered) {
+      const g = d.group_label || 'Umum';
+      if (!m.has(g)) m.set(g, []);
+      m.get(g)!.push(d);
+    }
+    return m;
+  }, [filtered]);
+
+  const handlePreview = async () => {
+    if (!selectedId) return;
+    setPreviewLoading(true);
+    setErr(null);
+    try {
+      const r = await axios.post<LibraryPreviewResponse>(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/preview`, {
+        extra_prompt: extraPrompt.trim() || null,
+        combine_with_existing: combineWithExisting,
+        combine_mode: combineMode,
+      });
+      setPreviewBase(r.data.markdown_base || '');
+      setPreviewCandidate(r.data.markdown_candidate || '');
+      setPreviewCombinedEdit(r.data.markdown_combined || '');
+      setPreviewNote(r.data.preview_note || '');
+      setPreviewOpen(true);
+    } catch {
+      setErr('Pratinjau regenerate gagal. Periksa API atau GITHUB_TOKEN.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleApplyPreview = async () => {
+    if (!selectedId) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/content`, {
+        markdown: previewCombinedEdit,
+        preview_commit: true,
+      });
+      setPreviewOpen(false);
+      await loadDiseases();
+      await loadDetail(selectedId);
+    } catch {
+      setErr('Gagal menyimpan hasil gabungan.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAiMergePreview = async () => {
+    if (!previewCandidate.trim()) {
+      setErr('Tidak ada kandidat baru untuk digabung.');
+      return;
+    }
+    setMergeAiLoading(true);
+    setErr(null);
+    try {
+      const r = await axios.post<{ markdown_merged: string }>(`${API_URL}/library/merge_markdown_copilot`, {
+        markdown_base: previewBase,
+        markdown_candidate: previewCandidate,
+      });
+      setPreviewCombinedEdit(r.data.markdown_merged);
+    } catch {
+      setErr('Gabung dengan AI gagal. Pastikan GITHUB_TOKEN pada server dan coba lagi.');
+    } finally {
+      setMergeAiLoading(false);
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!selectedId) return;
+    if (detail?.markdown && !window.confirm('Timpa artikel yang ada langsung ke disk (tanpa pratinjau)?')) {
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await axios.post(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/generate`, {
+        extra_prompt: extraPrompt.trim() || null,
+      });
+      setExtraPrompt('');
+      await loadDiseases();
+      await loadDetail(selectedId);
+    } catch {
+      setErr('Generate gagal. Periksa GITHUB_TOKEN atau koneksi API.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRefine = async () => {
+    if (!selectedId || !refineText.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await axios.post(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/refine`, {
+        instruction: refineText.trim(),
+      });
+      setRefineOpen(false);
+      setRefineText('');
+      await loadDiseases();
+      await loadDetail(selectedId);
+    } catch {
+      setErr('Perbarui dengan instruksi gagal (perlu GITHUB_TOKEN).');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedId) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/content`, {
+        markdown: editMarkdown,
+      });
+      setEditOpen(false);
+      await loadDiseases();
+      await loadDetail(selectedId);
+    } catch {
+      setErr('Simpan suntingan gagal.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedId) return;
+    if (!window.confirm('Hapus artikel permanen untuk penyakit ini?')) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await axios.delete(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/article`);
+      setDetail(null);
+      setSelectedId(null);
+      await loadDiseases();
+    } catch {
+      setErr('Penghapusan gagal.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openVisualManager = async () => {
+    if (!selectedId || !detail) return;
+    setErr(null);
+    setVisualOpen(true);
+    setVisualSelected(detail.images || []);
+    setVisualSuggestions([]);
+
+    const diseaseName = (detail.disease.name as string) || '';
+    if (!diseaseName.trim()) return;
+    try {
+      const r = await axios.post<{ images: ImageItem[] }>(`${API_URL}/get_related_images`, {
+        disease_name: diseaseName,
+        limit: 10,
+      });
+      setVisualSuggestions(r.data.images || []);
+    } catch {
+      // non-fatal
+    }
+  };
+
+  const saveVisualRefs = async () => {
+    if (!selectedId) return;
+    const usable = visualSelected.filter((img) => (img.image_abs_path || '').trim().length > 0);
+    if (usable.length !== visualSelected.length) {
+      setErr('Sebagian gambar tidak punya image_abs_path (tidak bisa disimpan). Coba regenerate atau pilih dari rekomendasi.');
+    }
+    setVisualBusy(true);
+    setErr(null);
+    try {
+      await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/visual_refs`, {
+        images: usable.map((img) => ({
+          image_abs_path: img.image_abs_path,
+          heading: img.heading || '',
+          source_name: img.source_name || '',
+          page_no: img.page_no || 0,
+        })),
+      });
+      setVisualOpen(false);
+      await loadDetail(selectedId);
+    } catch {
+      setErr('Gagal menyimpan referensi visual.');
+    } finally {
+      setVisualBusy(false);
+    }
+  };
+
+  const staseOptions = stases.length
+    ? stases
+    : [{ id: 0, slug: 'ipd', display_name: 'Stase IPD', sort_order: 0, disease_count: 0, filled_count: 0 }];
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 h-full bg-background">
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0 gap-0">
+        {/* List column */}
+        <aside className="w-full lg:w-[min(420px,40vw)] shrink-0 border-r border-slate-200/60 dark:border-slate-800 flex flex-col bg-slate-50/40 dark:bg-slate-950/30">
+          <div className="p-4 border-b border-slate-200/50 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100">Medical Library</h2>
+              <button
+                type="button"
+                onClick={() => void loadDiseases()}
+                className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                title="Muat ulang"
+              >
+                <span className="material-symbols-outlined text-[20px]">refresh</span>
+              </button>
+            </div>
+            <label className="block text-xs font-label text-slate-500">Stase</label>
+            <select
+              value={staseSlug}
+              onChange={(e) => {
+                setStaseSlug(e.target.value);
+                setSelectedId(null);
+                setDetail(null);
+              }}
+              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-2 text-sm"
+            >
+              {staseOptions.map((s) => (
+                <option key={s.slug} value={s.slug}>
+                  {s.display_name}
+                </option>
+              ))}
+            </select>
+            <div>
+              <div className="flex justify-between text-xs text-slate-500 mb-1">
+                <span>Progres penjelasan</span>
+                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                  {progress.filled}/{progress.total} ({progress.percent}%)
+                </span>
+              </div>
+              <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500"
+                  style={{ width: `${Math.min(100, progress.percent)}%` }}
+                />
+              </div>
+            </div>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Cari nama atau nomor..."
+              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 px-3 py-2 text-sm"
+            />
+            <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={onlyMissing}
+                onChange={(e) => setOnlyMissing(e.target.checked)}
+                className="rounded border-slate-300"
+              />
+              Hanya yang belum ada penjelasan
+            </label>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2">
+            {loadingList && <p className="text-center text-sm text-slate-400 py-6">Memuat...</p>}
+            {err && <p className="text-xs text-amber-600 px-2 py-2">{err}</p>}
+            {!loadingList &&
+              Array.from(grouped.entries()).map(([group, rows]) => (
+                <div key={group} className="mb-4">
+                  <div className="sticky top-0 z-10 bg-slate-100/90 dark:bg-slate-900/90 backdrop-blur px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500 border-b border-slate-200/60">
+                    {group}
+                  </div>
+                  <ul className="mt-1 space-y-0.5">
+                    {rows.map((d) => {
+                      const done = d.status === 'draft' || d.status === 'published';
+                      const active = selectedId === d.id;
+                      return (
+                        <li key={d.id}>
+                          <button
+                            type="button"
+                            onClick={() => void loadDetail(d.id)}
+                            className={`w-full text-left px-3 py-2.5 rounded-xl flex items-start gap-2 transition-colors ${
+                              active
+                                ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-800 dark:text-indigo-200'
+                                : 'hover:bg-white/60 dark:hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <span
+                              className={`material-symbols-outlined text-[18px] shrink-0 mt-0.5 ${
+                                done ? 'text-emerald-500' : 'text-slate-300'
+                              }`}
+                              style={{ fontVariationSettings: "'FILL' 1" }}
+                            >
+                              {done ? 'check_circle' : 'radio_button_unchecked'}
+                            </span>
+                            <span className="flex-1 min-w-0">
+                              <span className="text-[10px] text-slate-400 font-mono">#{d.catalog_no}</span>
+                              <span className="block text-sm font-medium leading-snug">{d.name}</span>
+                            </span>
+                            {d.competency_level && (
+                              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-slate-200/80 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                {d.competency_level}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+          </div>
+        </aside>
+
+        {/* Detail column */}
+        <section className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto bg-white/40 dark:bg-slate-900/20">
+          {!selectedId && (
+            <div className="m-auto text-center max-w-sm p-8 text-slate-400">
+              <span className="material-symbols-outlined text-5xl mb-3 opacity-40">menu_book</span>
+              <p className="text-sm">Pilih penyakit di daftar untuk melihat atau membuat penjelasan.</p>
+            </div>
+          )}
+          {selectedId && loadingDetail && (
+            <div className="m-auto flex flex-col items-center gap-2 text-slate-400">
+              <span className="material-symbols-outlined animate-spin">progress_activity</span>
+              <span className="text-sm">Memuat artikel...</span>
+            </div>
+          )}
+          {selectedId && !loadingDetail && detail && (
+            <div className="p-4 md:p-8 max-w-4xl mx-auto w-full space-y-6 pb-24">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-label text-slate-500 uppercase tracking-widest">Penyakit terpilih</p>
+                  <h2 className="text-2xl font-headline font-bold text-slate-800 dark:text-slate-100">
+                    {(detail.disease.name as string) || '—'}
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Status:{' '}
+                    <span className="font-semibold text-indigo-600">
+                      {(detail.disease.status as string) || 'missing'}
+                    </span>
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || previewLoading}
+                    onClick={() => void handlePreview()}
+                    className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {previewLoading ? '…' : 'Pratinjau regenerate'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || previewLoading}
+                    onClick={() => void handleGenerate()}
+                    className="px-4 py-2 rounded-full border border-indigo-200 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-200 text-sm font-medium hover:bg-indigo-100 disabled:opacity-50"
+                    title="Menimpa artikel di disk tanpa pratinjau"
+                  >
+                    {busy ? '…' : 'Simpan langsung'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !detail.markdown}
+                    onClick={() => {
+                      setEditMarkdown(detail.markdown || '');
+                      setEditOpen(true);
+                    }}
+                    className="px-4 py-2 rounded-full border border-slate-200 dark:border-slate-600 text-sm"
+                  >
+                    Sunting
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !detail.markdown}
+                    onClick={() => setRefineOpen(true)}
+                    className="px-4 py-2 rounded-full border border-violet-200 bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 text-sm"
+                  >
+                    Instruksi AI
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !detail.markdown}
+                    onClick={() => void handleDelete()}
+                    className="px-4 py-2 rounded-full border border-red-200 text-red-600 text-sm hover:bg-red-50"
+                  >
+                    Hapus
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200/80 dark:border-slate-700 p-4 bg-white/60 dark:bg-slate-900/40 space-y-3">
+                <label className="text-xs font-semibold text-slate-500">Prompt tambahan (opsional, untuk regenerate)</label>
+                <textarea
+                  value={extraPrompt}
+                  onChange={(e) => setExtraPrompt(e.target.value)}
+                  placeholder="Contoh: tekankan diagnosis banding dan red flag..."
+                  className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-transparent px-3 py-2 text-sm min-h-[72px]"
+                />
+                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={combineWithExisting}
+                      onChange={(e) => setCombineWithExisting(e.target.checked)}
+                      className="rounded border-slate-300"
+                    />
+                    Gabungkan dengan artikel saat ini
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <span className="text-slate-500">Mode:</span>
+                    <select
+                      value={combineMode}
+                      onChange={(e) => setCombineMode(e.target.value as 'append' | 'replace')}
+                      disabled={!combineWithExisting}
+                      className="rounded-lg border border-slate-200 dark:border-slate-600 bg-white/80 dark:bg-slate-900/80 px-2 py-1 text-xs"
+                    >
+                      <option value="replace">Ganti penuh (kandidat saja)</option>
+                      <option value="append">Tambah di bawah (lama + pembaruan)</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              {detail.images && detail.images.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <h3 className="font-headline text-sm font-bold text-slate-500 flex items-center gap-2 uppercase tracking-widest">
+                      <span className="material-symbols-outlined text-[18px]">imagesmode</span>
+                      Referensi visual
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => void openVisualManager()}
+                      className="text-xs px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-700 hover:bg-white/60"
+                    >
+                      Kelola
+                    </button>
+                  </div>
+                  <div className="flex gap-4 overflow-x-auto pb-2 snap-x">
+                    {detail.images.map((img, iIdx) => (
+                      <a
+                        key={iIdx}
+                        href={`${API_URL}${img.image_url}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 border border-slate-100 dark:border-slate-800 rounded-2xl overflow-hidden w-48 shadow-sm hover:border-indigo-400 transition-colors snap-center"
+                      >
+                        <img
+                          src={`${API_URL}${img.image_url}`}
+                          alt={img.heading}
+                          className="w-full h-32 object-cover"
+                          onError={(e) => {
+                            e.currentTarget.onerror = null;
+                            e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                          }}
+                        />
+                        <div className="p-2 bg-white/90 dark:bg-slate-900/90">
+                          <p className="text-[11px] text-center truncate text-slate-700 dark:text-slate-300">{img.heading}</p>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(!detail.images || detail.images.length === 0) && (
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-headline text-sm font-bold text-slate-500 flex items-center gap-2 uppercase tracking-widest">
+                    <span className="material-symbols-outlined text-[18px]">imagesmode</span>
+                    Referensi visual
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => void openVisualManager()}
+                    className="text-xs px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-700 hover:bg-white/60"
+                  >
+                    Tambah
+                  </button>
+                </div>
+              )}
+
+              <div className="rounded-[2rem] border border-white/40 bg-surface-container-low/50 p-6 md:p-10 glass-border">
+                {detail.markdown ? (
+                  <article className="prose-slate prose max-w-none text-on-surface">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                      {detail.markdown}
+                    </ReactMarkdown>
+                  </article>
+                ) : (
+                  <p className="text-slate-500 text-sm italic">Belum ada artikel. Gunakan Generate untuk membuat dari RAG.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {refineOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setRefineOpen(false)}>
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-lg w-full p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-headline font-bold text-lg mb-2">Perbarui dengan instruksi</h3>
+            <p className="text-xs text-slate-500 mb-3">Membutuhkan GITHUB_TOKEN di server.</p>
+            <textarea
+              value={refineText}
+              onChange={(e) => setRefineText(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm min-h-[120px]"
+              placeholder="Contoh: ringkas bagian etiologi, tambahkan tabel dosis..."
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setRefineOpen(false)}>
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={busy || refineText.trim().length < 3}
+                className="px-4 py-2 text-sm rounded-full bg-indigo-600 text-white disabled:opacity-50"
+                onClick={() => void handleRefine()}
+              >
+                Terapkan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {previewOpen && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+          onClick={() => setPreviewOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl max-w-[min(96rem,100%)] w-full p-4 md:p-6 shadow-xl my-4 max-h-[95vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-start gap-2 mb-3">
+              <div>
+                <h3 className="font-headline font-bold text-lg">Pratinjau regenerate</h3>
+                <p className="text-xs text-slate-500 mt-1">{previewNote}</p>
+                {err && <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 max-w-xl">{err}</p>}
+              </div>
+              <button
+                type="button"
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+                onClick={() => setPreviewOpen(false)}
+                aria-label="Tutup"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 flex-1 min-h-0">
+              <div className="flex flex-col min-h-0 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+                <div className="text-xs font-semibold px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600">Artikel utama (saat ini)</div>
+                <div className="overflow-y-auto p-3 max-h-[min(40vh,320px)] lg:max-h-[min(70vh,480px)] prose prose-sm dark:prose-invert max-w-none text-sm">
+                  {previewBase.trim() ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                      {previewBase}
+                    </ReactMarkdown>
+                  ) : (
+                    <p className="text-slate-400 italic text-sm">(Kosong)</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-col min-h-0 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+                <div className="text-xs font-semibold px-3 py-2 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-800 dark:text-indigo-200">
+                  Kandidat baru
+                </div>
+                <div className="overflow-y-auto p-3 max-h-[min(40vh,320px)] lg:max-h-[min(70vh,480px)] prose prose-sm dark:prose-invert max-w-none text-sm">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                    {previewCandidate}
+                  </ReactMarkdown>
+                </div>
+              </div>
+              <div className="flex flex-col min-h-0 border border-violet-200 dark:border-violet-800 rounded-xl overflow-hidden lg:col-span-1">
+                <div className="text-xs font-semibold px-3 py-2 bg-violet-50 dark:bg-violet-950/40 text-violet-800 dark:text-violet-200 flex flex-wrap items-center justify-between gap-2">
+                  <span>Hasil gabungan (bisa diedit)</span>
+                  <button
+                    type="button"
+                    disabled={mergeAiLoading || !previewCandidate.trim() || busy}
+                    onClick={() => void handleAiMergePreview()}
+                    className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 text-white text-[11px] font-medium hover:bg-violet-700 disabled:opacity-50"
+                    title="Menggabungkan artikel utama dan kandidat dengan Copilot"
+                  >
+                    <span className="material-symbols-outlined text-[14px]">auto_awesome</span>
+                    {mergeAiLoading ? 'Menggabung…' : 'Gabung dengan AI'}
+                  </button>
+                </div>
+                <textarea
+                  value={previewCombinedEdit}
+                  onChange={(e) => setPreviewCombinedEdit(e.target.value)}
+                  className="flex-1 w-full min-h-[min(40vh,280px)] lg:min-h-[min(70vh,440px)] p-3 text-xs font-mono bg-slate-50/80 dark:bg-slate-950/40 border-0 resize-y focus:ring-2 focus:ring-violet-400 outline-none"
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-2">
+              Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Belum ada perubahan di disk sampai Anda menekan Terapkan.
+            </p>
+            <div className="flex justify-end gap-2 mt-4 flex-wrap">
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setPreviewOpen(false)}>
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={busy || !previewCombinedEdit.trim()}
+                className="px-4 py-2 text-sm rounded-full bg-indigo-600 text-white disabled:opacity-50"
+                onClick={() => void handleApplyPreview()}
+              >
+                Terapkan ke artikel utama
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {visualOpen && (
+        <div
+          className="fixed inset-0 z-[55] bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+          onClick={() => setVisualOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl max-w-5xl w-full p-4 md:p-6 shadow-xl my-4 max-h-[92vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-start gap-2 mb-3">
+              <div>
+                <h3 className="font-headline font-bold text-lg">Kelola Referensi Visual</h3>
+                <p className="text-xs text-slate-500 mt-1">Tambah/hapus gambar yang ditampilkan pada artikel ini (disimpan ke meta.json).</p>
+                {err && <p className="text-xs text-amber-700 dark:text-amber-400 mt-2">{err}</p>}
+              </div>
+              <button
+                type="button"
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+                onClick={() => setVisualOpen(false)}
+                aria-label="Tutup"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-0">
+              <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden flex flex-col min-h-0">
+                <div className="px-3 py-2 text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600">
+                  Dipilih ({visualSelected.length})
+                </div>
+                <div className="p-3 overflow-y-auto flex-1 min-h-0">
+                  {visualSelected.length === 0 ? (
+                    <p className="text-sm text-slate-400 italic">Belum ada gambar dipilih.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {visualSelected.map((img, idx) => (
+                        <div key={`${img.image_url}-${idx}`} className="border border-slate-200 rounded-xl overflow-hidden relative">
+                          <img
+                            src={`${API_URL}${img.image_url}`}
+                            alt={img.heading}
+                            className="w-full h-24 object-cover"
+                            onError={(e) => {
+                              e.currentTarget.onerror = null;
+                              e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setVisualSelected((prev) => prev.filter((_, i) => i !== idx))}
+                            className="absolute top-2 right-2 bg-black/60 text-white rounded-full p-1 hover:bg-black/70"
+                            title="Hapus dari pilihan"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">delete</span>
+                          </button>
+                          <div className="p-2 bg-white/90">
+                            <p className="text-[11px] truncate text-slate-700">{img.heading || 'Gambar'}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden flex flex-col min-h-0">
+                <div className="px-3 py-2 text-xs font-semibold bg-indigo-50 dark:bg-indigo-950/40 text-indigo-800 dark:text-indigo-200">
+                  Rekomendasi dari RAG ({visualSuggestions.length})
+                </div>
+                <div className="p-3 overflow-y-auto flex-1 min-h-0">
+                  {visualSuggestions.length === 0 ? (
+                    <p className="text-sm text-slate-400 italic">Tidak ada rekomendasi (atau API belum siap).</p>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {visualSuggestions.map((img, idx) => {
+                        const exists = visualSelected.some((s) => (s.image_abs_path || '') === (img.image_abs_path || '') && (img.image_abs_path || '').trim() !== '');
+                        return (
+                          <button
+                            key={`${img.image_url}-${idx}`}
+                            type="button"
+                            disabled={exists}
+                            onClick={() => setVisualSelected((prev) => [...prev, img])}
+                            className={`border rounded-xl overflow-hidden text-left transition-colors ${exists ? 'opacity-60 border-slate-200' : 'hover:border-indigo-400 border-slate-200'}`}
+                            title={exists ? 'Sudah dipilih' : 'Tambah'}
+                          >
+                            <img
+                              src={`${API_URL}${img.image_url}`}
+                              alt={img.heading}
+                              className="w-full h-24 object-cover"
+                              onError={(e) => {
+                                e.currentTarget.onerror = null;
+                                e.currentTarget.src = 'https://via.placeholder.com/150?text=Img';
+                              }}
+                            />
+                            <div className="p-2 bg-white/90">
+                              <p className="text-[11px] truncate text-slate-700">{img.heading || 'Gambar'}</p>
+                              <p className="text-[10px] text-slate-400 truncate">{img.source_name} • Hal {img.page_no}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4 flex-wrap">
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setVisualOpen(false)}>
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={visualBusy}
+                className="px-4 py-2 text-sm rounded-full bg-indigo-600 text-white disabled:opacity-50"
+                onClick={() => void saveVisualRefs()}
+              >
+                {visualBusy ? 'Menyimpan…' : 'Simpan referensi visual'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setEditOpen(false)}>
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-3xl w-full p-6 shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-headline font-bold text-lg mb-2">Sunting Markdown</h3>
+            <textarea
+              value={editMarkdown}
+              onChange={(e) => setEditMarkdown(e.target.value)}
+              className="flex-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm font-mono min-h-[320px] overflow-y-auto"
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setEditOpen(false)}>
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                className="px-4 py-2 text-sm rounded-full bg-indigo-600 text-white"
+                onClick={() => void handleSaveEdit()}
+              >
+                Simpan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -253,7 +1680,8 @@ export default function App() {
   const [evidenceModal, setEvidenceModal] = useState<{ citation: string; content: EvidenceItem[] } | null>(null);
   const [imageModal, setImageModal] = useState<ImageItem | null>(null);
   const [isSidebarMinimized, setIsSidebarMinimized] = useState(false);
-  const [kgDisease, setKgDisease] = useState<string | null>(null); // Ide 18: KG modal trigger
+  const [kgInitialDisease, setKgInitialDisease] = useState<string | null>(null); // auto-select in KG panel
+  const [activeView, setActiveView] = useState<ActiveView>('chat');
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -328,8 +1756,11 @@ export default function App() {
 
   const clearChat = () => setMessages([]);
 
-  // Ide 18: open KG from the most recent bot answer
-  const handleOpenKG = (disease: string) => setKgDisease(disease);
+  // Open KG panel and auto-select matching disease
+  const handleOpenKG = (disease: string) => {
+    setKgInitialDisease(disease);
+    setActiveView('kg');
+  };
 
   // ── Render section content – Ide 2 (Markdown) ──
   const renderSection = (section: DraftSection, sIdx: number) => {
@@ -355,9 +1786,6 @@ export default function App() {
 
   return (
     <div className="h-screen w-full overflow-hidden flex bg-background">
-      {/* ── Knowledge Graph Modal (Ide 18) ── */}
-      {kgDisease && <KnowledgeGraphModal disease={kgDisease} onClose={() => setKgDisease(null)} />}
-
       {/* ── SideNavBar ── */}
       <nav className={`fixed left-0 top-0 h-full z-40 flex-col p-4 bg-slate-50/40 dark:bg-slate-950/40 backdrop-blur-2xl transition-all duration-300 ease-in-out ${isSidebarMinimized ? 'w-20' : 'w-72'} rounded-r-3xl tonal-layering no-border shadow-[40px_0_60px_-10px_rgba(0,0,0,0.04)] font-[Inter] text-sm hidden md:flex overflow-x-hidden`}>
         <div className="flex items-center gap-3 mb-10 px-2 mt-4">
@@ -370,22 +1798,34 @@ export default function App() {
           </div>
         </div>
 
-        <button onClick={clearChat} className={`gradient-btn w-full rounded-full py-3 px-3 text-white font-medium mb-8 flex items-center justify-center gap-2 hover:opacity-90 transition-all ${isSidebarMinimized ? 'px-0' : ''}`}>
+        <button
+          onClick={() => {
+            if (activeView === 'chat') clearChat();
+            else setActiveView('chat');
+          }}
+          className={`gradient-btn w-full rounded-full py-3 px-3 text-white font-medium mb-8 flex items-center justify-center gap-2 hover:opacity-90 transition-all ${isSidebarMinimized ? 'px-0' : ''}`}
+        >
           <span className="material-symbols-outlined text-[20px] shrink-0">add</span>
-          <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 hidden' : 'opacity-100'}`}>New Consultation</span>
+          <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 hidden' : 'opacity-100'}`}>
+            {activeView === 'chat' ? 'New Consultation' : 'Kembali ke Chat'}
+          </span>
         </button>
 
         <div className="flex-1 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-2">
-          {[
-            { icon: 'chat_bubble', label: 'Recent Chats', active: true },
-            { icon: 'book', label: 'Medical Library' },
-            { icon: 'hub', label: 'Knowledge Graph' },
-            { icon: 'query_stats', label: 'Analytics' },
-          ].map((item) => (
-            <a
+          {(
+            [
+              { icon: 'chat_bubble', label: 'Recent Chats', id: 'chat' as const },
+              { icon: 'book', label: 'Medical Library', id: 'library' as const },
+              { icon: 'hub', label: 'Knowledge Graph', id: 'kg' as const },
+              { icon: 'query_stats', label: 'Analytics', id: 'analytics' as const },
+            ] as const
+          ).map((item) => (
+            <button
+              type="button"
               key={item.label}
-              className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all flex-row cursor-pointer ${
-                item.active
+              onClick={() => setActiveView(item.id)}
+              className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all flex-row cursor-pointer text-left w-full ${
+                activeView === item.id
                   ? 'bg-indigo-50/50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300'
                   : 'text-slate-600 dark:text-slate-400 hover:text-indigo-500 hover:bg-white/20 dark:hover:bg-slate-800/20'
               }`}
@@ -394,7 +1834,7 @@ export default function App() {
               <span className={`font-medium whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>
                 {item.label}
               </span>
-            </a>
+            </button>
           ))}
         </div>
 
@@ -412,32 +1852,59 @@ export default function App() {
       </nav>
 
       {/* ── Main Content ── */}
-      <main className={`flex-1 flex flex-col h-full relative transition-all duration-300 ml-0 ${isSidebarMinimized ? 'md:ml-20' : 'md:ml-72'}`}>
+      <main className={`flex-1 flex flex-col h-full min-h-0 relative transition-all duration-300 ml-0 ${isSidebarMinimized ? 'md:ml-20' : 'md:ml-72'}`}>
         {/* Header */}
-        <header className="flex justify-between items-center px-4 md:px-8 h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30">
+        <header className="flex justify-between items-center px-4 md:px-8 h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30 shrink-0">
           <div className="flex items-center gap-4">
             <button onClick={() => setIsSidebarMinimized(!isSidebarMinimized)} className="hidden md:flex p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
               <span className="material-symbols-outlined">{isSidebarMinimized ? 'menu' : 'menu_open'}</span>
             </button>
-            <h1 className="text-xl md:text-2xl font-headline font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">Medical RAG</h1>
+            <h1 className="text-xl md:text-2xl font-headline font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
+              Medical RAG
+              {activeView === 'library' && (
+                <span className="block text-xs font-normal text-slate-500 mt-0.5">Medical Library</span>
+              )}
+            </h1>
           </div>
           <div className="flex items-center gap-2 md:gap-4">
-            <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-full border border-emerald-100 dark:border-emerald-800">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">Multi-turn AI</span>
-            </div>
-            <button onClick={clearChat} className="hidden md:flex items-center gap-2 px-4 py-2 bg-surface-container-lowest glass-border rounded-full text-secondary hover:bg-surface-container-high transition-colors font-medium text-sm">
-              <span className="material-symbols-outlined text-[18px]">delete</span>
-              Bersihkan Chat
-            </button>
+            {activeView === 'chat' && (
+              <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-full border border-emerald-100 dark:border-emerald-800">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">Multi-turn AI</span>
+              </div>
+            )}
+            {activeView === 'chat' && (
+              <button onClick={clearChat} className="hidden md:flex items-center gap-2 px-4 py-2 bg-surface-container-lowest glass-border rounded-full text-secondary hover:bg-surface-container-high transition-colors font-medium text-sm">
+                <span className="material-symbols-outlined text-[18px]">delete</span>
+                Bersihkan Chat
+              </button>
+            )}
             <button className="p-2 text-slate-500 hover:bg-white/40 transition-all rounded-full scale-95 active:duration-150">
               <span className="material-symbols-outlined">settings</span>
             </button>
           </div>
         </header>
 
+        {activeView === 'library' && <MedicalLibraryPanel components={mdComponents} />}
+
+        {activeView === 'kg' && (
+          <KnowledgeGraphPanel
+            initialDisease={kgInitialDisease}
+            onDismissInitial={() => setKgInitialDisease(null)}
+          />
+        )}
+
+        {activeView === 'analytics' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-500">
+            <span className="material-symbols-outlined text-5xl mb-4 opacity-40">query_stats</span>
+            <p className="text-sm">Analytics akan tersedia di iterasi berikutnya.</p>
+          </div>
+        )}
+
         {/* Chat Canvas */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-8 pb-40 flex flex-col gap-8">
+        {activeView === 'chat' && (
+        <>
+        <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-8 pb-40 flex flex-col gap-8 min-h-0">
           {messages.length === 0 && (
             <div className="m-auto text-center max-w-md pt-20 flex flex-col items-center opacity-70">
               <span className="material-symbols-outlined text-6xl text-secondary mb-4 opacity-50" style={{ fontVariationSettings: "'FILL' 1" }}>biotech</span>
@@ -659,6 +2126,8 @@ export default function App() {
             </div>
           </div>
         </div>
+        </>
+        )}
 
         {/* ── Evidence Modal ── */}
         {evidenceModal && (
