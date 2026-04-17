@@ -284,7 +284,8 @@ def migrate_library(supabase):
 
         print(f"   📋 Migrating {len(diseases)} diseases for {stase_row['slug']}...")
 
-        for d in tqdm(diseases, desc=f"  {stase_row['slug']}"):
+        for raw_d in tqdm(diseases, desc=f"  {stase_row['slug']}"):
+            d = dict(raw_d)
             cat_data = {
                 "stase_id": new_stase_id,
                 "catalog_no": d["catalog_no"],
