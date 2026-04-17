@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 // @ts-ignore: missing type declarations
 import ForceGraph2D from 'react-force-graph-2d';
+import { hierarchy, tree as d3tree } from 'd3-hierarchy';
 
 // ─── TYPES ──────────────────────────────────────────────────────────────────
 type EvidenceItem = {
@@ -187,6 +188,53 @@ const mdComponents = {
 
 
 // ─── KNOWLEDGE GRAPH PANEL ───────────────────────────────────────────────────
+
+/** Reingold-Tilford tree layout — each node gets an exact (x, y) without overlap. */
+const TREE_NODE_W = 230; // horizontal space per node slot
+const TREE_NODE_H = 130; // vertical space between levels
+
+type TreeDatum = { id: string; children: TreeDatum[] };
+
+function computeTreeLayout(
+  nodes: MindmapNode[],
+  edges: MindmapEdge[],
+): Map<string, { x: number; y: number }> {
+  if (nodes.length === 0) return new Map();
+
+  const childrenMap = new Map<string, string[]>();
+  const hasParent = new Set<string>();
+  for (const e of edges) {
+    if (!childrenMap.has(e.source)) childrenMap.set(e.source, []);
+    childrenMap.get(e.source)!.push(e.target);
+    hasParent.add(e.target);
+  }
+
+  const rootNode =
+    nodes.find(n => n.type === 'root') ??
+    nodes.find(n => !hasParent.has(n.id)) ??
+    nodes[0];
+  if (!rootNode) return new Map();
+
+  const visited = new Set<string>();
+  const buildDatum = (id: string): TreeDatum => {
+    visited.add(id);
+    return {
+      id,
+      children: (childrenMap.get(id) ?? [])
+        .filter(cid => !visited.has(cid))
+        .map(cid => buildDatum(cid)),
+    };
+  };
+  const root = hierarchy<TreeDatum>(buildDatum(rootNode.id));
+
+  d3tree<TreeDatum>().nodeSize([TREE_NODE_W, TREE_NODE_H])(root as any);
+
+  const pos = new Map<string, { x: number; y: number }>();
+  (root as any).each((d: any) => pos.set(d.data.id, { x: d.x, y: d.y }));
+
+  return pos;
+}
+
 const NODE_TYPE_OPTIONS = ['root', 'section', 'concept', 'fact'] as const;
 type NodeType = typeof NODE_TYPE_OPTIONS[number];
 
@@ -202,6 +250,67 @@ function drawMindmapNode(
   const isSection = node.type === 'section';
   const isConcept = node.type === 'concept';
 
+  const fillColors: Record<string, string> = { root: '#6366f1', section: '#0ea5e9', concept: '#d1fae5', fact: '#fef3c7' };
+  const borderColors: Record<string, string> = { root: '#4338ca', section: '#0369a1', concept: '#10b981', fact: '#f59e0b' };
+  const textColors: Record<string, string> = { root: '#ffffff', section: '#ffffff', concept: '#065f46', fact: '#92400e' };
+
+  const rr = (x: number, y: number, w: number, h: number, rad: number) => {
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  };
+
+  // ── Compact (LOD) mode — fixed graph-coordinate boxes so nodes never visually collide
+  const LOD_THRESHOLD = 0.65;
+  if (globalScale < LOD_THRESHOLD) {
+    const cw = isRoot ? 190 : isSection ? 160 : 130;
+    const ch = isRoot ? 44 : isSection ? 38 : 32;
+    const cr = isRoot ? 10 : 6;
+    const cx = nx - cw / 2;
+    const cy = ny - ch / 2;
+    if (isRoot || isSection) {
+      ctx.save();
+      ctx.shadowColor = isRoot ? 'rgba(99,102,241,0.35)' : 'rgba(14,165,233,0.25)';
+      ctx.shadowBlur = isRoot ? 12 : 7;
+    }
+    rr(cx, cy, cw, ch, cr);
+    ctx.fillStyle = fillColors[node.type] ?? '#e2e8f0';
+    ctx.fill();
+    ctx.strokeStyle = isActive ? '#f43f5e' : (borderColors[node.type] ?? '#94a3b8');
+    ctx.lineWidth = isActive ? 2 : 1.2;
+    ctx.stroke();
+    if (isRoot || isSection) ctx.restore();
+
+    // Render label with fixed graph-coordinate font so text scales down with zoom
+    const cfs = isRoot ? 13 : isSection ? 11 : 9.5;
+    ctx.font = `${isRoot || isSection ? '700' : '500'} ${cfs}px Inter,sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = textColors[node.type] ?? '#1e293b';
+    const rawLbl = String(node.label ?? '');
+    const maxCw = cw - 16;
+    const lodLines: string[] = [];
+    let lc = '';
+    for (const w of rawLbl.split(' ')) {
+      const t = lc ? `${lc} ${w}` : w;
+      if (ctx.measureText(t).width > maxCw && lc) { lodLines.push(lc); lc = w; }
+      else lc = t;
+    }
+    if (lc) lodLines.push(lc);
+    const clh = cfs * 1.3;
+    const ty0 = ny - (lodLines.length - 1) * clh / 2;
+    lodLines.forEach((line, i) => ctx.fillText(line, nx, ty0 + i * clh));
+
+    node.__bw = cw;
+    node.__bh = ch;
+    return;
+  }
+
+  // ── Full label mode (globalScale ≥ LOD_THRESHOLD)
   const baseFontSize = isRoot ? 13 : isSection ? 10.5 : isConcept ? 9 : 8.5;
   const fs = Math.max(baseFontSize / globalScale, 2.5);
   ctx.font = `${isRoot || isSection ? '700' : '500'} ${fs}px Inter,sans-serif`;
@@ -227,25 +336,11 @@ function drawMindmapNode(
   const by = ny - bh / 2;
   const r = isRoot ? Math.min(bh * 0.45, 12 / globalScale) : Math.min(6 / globalScale, bh * 0.35);
 
-  const fillColors: Record<string, string> = { root: '#6366f1', section: '#0ea5e9', concept: '#d1fae5', fact: '#fef3c7' };
-  const textColors: Record<string, string> = { root: '#ffffff', section: '#ffffff', concept: '#065f46', fact: '#92400e' };
-  const borderColors: Record<string, string> = { root: '#4338ca', section: '#0369a1', concept: '#10b981', fact: '#f59e0b' };
-
   if (isRoot || isSection) {
     ctx.save();
     ctx.shadowColor = isRoot ? 'rgba(99,102,241,0.4)' : 'rgba(14,165,233,0.3)';
     ctx.shadowBlur = (isRoot ? 14 : 8) / globalScale;
   }
-
-  const rr = (x: number, y: number, w: number, h: number, rad: number) => {
-    ctx.beginPath();
-    ctx.moveTo(x + rad, y);
-    ctx.arcTo(x + w, y, x + w, y + h, rad);
-    ctx.arcTo(x + w, y + h, x, y + h, rad);
-    ctx.arcTo(x, y + h, x, y, rad);
-    ctx.arcTo(x, y, x + w, y, rad);
-    ctx.closePath();
-  };
 
   rr(bx, by, bw, bh, r);
   ctx.fillStyle = fillColors[node.type] ?? '#e2e8f0';
@@ -287,8 +382,31 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
   const [showVisuals, setShowVisuals] = useState(false);
   const [graphKey, setGraphKey] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const graphPanelRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
   const graphRef = useRef<any>(null);
+
+  const toggleGraphFullscreen = useCallback(async () => {
+    const el = graphPanelRef.current;
+    if (!el) return;
+    try {
+      if (!document.fullscreenElement) await el.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch {
+      /* fullscreen may be blocked */
+    }
+  }, []);
+
+  useEffect(() => {
+    const sync = () => {
+      const panel = graphPanelRef.current;
+      const isNow = !!panel && document.fullscreenElement === panel;
+      setIsGraphFullscreen(isNow);
+    };
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
 
   useEffect(() => {
     axios.get<{ stases: LibraryStase[] }>(`${API_URL}/library/stases`)
@@ -310,17 +428,6 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
     const match = diseases.find((d) => d.name.toLowerCase().includes(name) || name.includes(d.name.toLowerCase()));
     if (match) { handleSelectDisease(match); onDismissInitial?.(); }
   }, [initialDisease, diseases]);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const obs = new ResizeObserver(() => {
-      if (containerRef.current)
-        setDimensions({ width: containerRef.current.offsetWidth, height: containerRef.current.offsetHeight });
-    });
-    obs.observe(containerRef.current);
-    setDimensions({ width: containerRef.current.offsetWidth, height: containerRef.current.offsetHeight });
-    return () => obs.disconnect();
-  }, []);
 
   const handleSelectDisease = async (disease: LibraryDiseaseRow) => {
     if (!disease.status || disease.status === 'missing') return;
@@ -476,13 +583,41 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
 
   const graphData = useMemo(() => {
     if (!localMindmap || localMindmap.nodes.length === 0) return { nodes: [], links: [] };
+    const pos = computeTreeLayout(localMindmap.nodes, localMindmap.edges);
+    const nodes = localMindmap.nodes.map(n => {
+      const p = pos.get(n.id);
+      return p ? { ...n, x: p.x, y: p.y, fx: p.x, fy: p.y } : { ...n };
+    });
     return {
-      nodes: localMindmap.nodes,
+      nodes,
       links: localMindmap.edges.map(e => ({ source: e.source, target: e.target })),
     };
   }, [localMindmap]);
 
   const hasGraph = localMindmap && !localMindmap.not_generated && localMindmap.nodes.length > 0;
+
+  useLayoutEffect(() => {
+    if (!hasGraph) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const measure = () => {
+      if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+        // #region agent log
+        console.log('[DBG-087f38] measure', { w: el.offsetWidth, h: el.offsetHeight, isGraphFullscreen });
+        // #endregion
+        setDimensions(prev => {
+          if (prev.width === el.offsetWidth && prev.height === el.offsetHeight) return prev;
+          // After dimension change, re-fit the graph on next frame
+          requestAnimationFrame(() => graphRef.current?.zoomToFit(350, 40));
+          return { width: el.offsetWidth, height: el.offsetHeight };
+        });
+      }
+    };
+    const obs = new ResizeObserver(measure);
+    obs.observe(el);
+    requestAnimationFrame(measure);
+    return () => obs.disconnect();
+  }, [hasGraph, isGraphFullscreen]);
 
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -550,7 +685,10 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
       </div>
 
       {/* ── Right: Mindmap Canvas ── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div
+        ref={graphPanelRef}
+        className={`flex-1 flex flex-col min-w-0 min-h-0 ${isGraphFullscreen ? 'bg-white dark:bg-slate-950' : ''}`}
+      >
 
         {/* Empty: nothing selected */}
         {!selectedId && !loadingMindmap && (
@@ -602,22 +740,24 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
         {selectedId && !loadingMindmap && !generating && hasGraph && (
           <>
             {/* Header */}
-            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-3 shrink-0 flex-wrap">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h2 className="text-base font-headline font-bold text-slate-800 dark:text-slate-100 truncate">{localMindmap!.disease}</h2>
-                  {localMindmap!.competency_level && (
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
-                      localMindmap!.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
-                      localMindmap!.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
-                    }`}>Level {localMindmap!.competency_level}</span>
-                  )}
-                  <span className="text-[10px] text-slate-400">{localMindmap!.nodes.length} node</span>
-                  {hasUnsaved && <span className="text-[10px] text-amber-500 font-medium">● Belum disimpan</span>}
-                  {saveMsg && <span className={`text-[10px] font-medium ${saveMsg === 'Tersimpan' ? 'text-emerald-500' : 'text-red-500'}`}>{saveMsg}</span>}
+            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-base font-headline font-bold text-slate-800 dark:text-slate-100 truncate">{localMindmap!.disease}</h2>
+                    {localMindmap!.competency_level && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                        localMindmap!.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
+                        localMindmap!.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
+                      }`}>Level {localMindmap!.competency_level}</span>
+                    )}
+                    <span className="text-[10px] text-slate-400">{localMindmap!.nodes.length} node</span>
+                    {hasUnsaved && <span className="text-[10px] text-amber-500 font-medium">● Belum disimpan</span>}
+                    {saveMsg && <span className={`text-[10px] font-medium ${saveMsg === 'Tersimpan' ? 'text-emerald-500' : 'text-red-500'}`}>{saveMsg}</span>}
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap mt-2">
                 {(localMindmap!.visual_refs?.length ?? 0) > 0 && (
                   <button onClick={() => setShowVisuals(!showVisuals)}
                     className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-amber-50 text-amber-600 border border-amber-100 rounded-full hover:bg-amber-100 transition-all">
@@ -626,6 +766,15 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
                   </button>
                 )}
                 {/* Edit Mode Toggle */}
+                <button
+                  type="button"
+                  onClick={toggleGraphFullscreen}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-slate-50 text-slate-600 border border-slate-200 rounded-full hover:bg-slate-100 transition-all font-medium"
+                  title={isGraphFullscreen ? 'Keluar layar penuh' : 'Layar penuh'}
+                >
+                  <span className="material-symbols-outlined text-[13px]">{isGraphFullscreen ? 'fullscreen_exit' : 'fullscreen'}</span>
+                  {isGraphFullscreen ? 'Keluar' : 'Layar penuh'}
+                </button>
                 <button
                   onClick={() => { setEditMode(m => !m); setActiveNode(null); }}
                   className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] rounded-full border transition-all font-medium ${
@@ -690,31 +839,31 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
             </div>
 
             {/* Canvas + edit panel */}
-            <div className="flex-1 flex min-h-0 relative overflow-hidden">
+            <div className="flex-1 flex min-h-0 min-w-0 relative">
               {/* Canvas */}
-              <div className="flex-1 relative" ref={containerRef} onClick={(e) => { if ((e.target as HTMLElement).tagName === 'CANVAS') setActiveNode(null); }}>
+              <div className="absolute inset-0" ref={containerRef} onClick={(e) => { if ((e.target as HTMLElement).tagName === 'CANVAS') setActiveNode(null); }}>
                 <ForceGraph2D
                   key={graphKey}
                   ref={graphRef}
                   graphData={graphData as any}
-                  width={dimensions.width - (editMode && activeNode ? 300 : 0)}
+                  width={dimensions.width}
                   height={dimensions.height}
-                  dagMode="radialout"
-                  dagLevelDistance={110}
-                  nodeRelSize={1}
-                  nodeVal={(node: any) => {
-                    const t = node.type;
-                    return t === 'root' ? 60 : t === 'section' ? 28 : t === 'concept' ? 18 : 12;
+                  cooldownTicks={0}
+                  warmupTicks={0}
+                  d3AlphaDecay={1}
+                  onEngineStop={() => {
+                    if (!graphRef.current) return;
+                    // #region agent log
+                    console.log('[DBG-087f38] onEngineStop', { dimW: dimensions.width, dimH: dimensions.height, containerW: containerRef.current?.offsetWidth, containerH: containerRef.current?.offsetHeight });
+                    // #endregion
+                    graphRef.current.zoomToFit(350, 40);
                   }}
                   linkColor={() => 'rgba(148,163,184,0.45)'}
                   linkWidth={1.4}
-                  linkCurvature={0.25}
+                  linkCurvature={0}
                   linkDirectionalArrowLength={5}
                   linkDirectionalArrowRelPos={1}
-                  enableNodeDrag
-                  cooldownTicks={150}
-                  d3AlphaDecay={0.02}
-                  d3VelocityDecay={0.3}
+                  enableNodeDrag={editMode}
                   onNodeClick={handleNodeClick}
                   nodeCanvasObjectMode={() => 'replace' as const}
                   nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) =>
@@ -830,15 +979,6 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
               )}
             </div>
 
-            {/* Key Takeaways */}
-            {(localMindmap!.key_takeaways?.length ?? 0) > 0 && (
-              <div className="shrink-0 border-t border-slate-100 dark:border-slate-800 px-5 py-2.5 bg-violet-50/50 dark:bg-violet-900/10 flex items-start gap-2 flex-wrap">
-                <span className="material-symbols-outlined text-violet-400 text-[14px] mt-0.5">stars</span>
-                {localMindmap!.key_takeaways!.map((t, i) => (
-                  <span key={i} className="text-xs bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 px-2.5 py-1 rounded-full border border-violet-100">{t}</span>
-                ))}
-              </div>
-            )}
           </>
         )}
       </div>
@@ -1122,70 +1262,13 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         page_no: img.page_no || 0,
       })),
     };
-    // #region agent log
-    fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
-      body: JSON.stringify({
-        sessionId: '446f67',
-        runId: 'pre-fix',
-        hypothesisId: 'H1',
-        location: 'App.tsx:saveVisualRefs:beforePatch',
-        message: 'saveVisualRefs attempt',
-        data: {
-          apiBase: API_URL,
-          selectedId,
-          staseSlug,
-          imagesLen: body.images.length,
-          firstItem: body.images[0] ?? null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     setVisualBusy(true);
     setErr(null);
     try {
       await axios.patch(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/visual_refs`, body);
-      // #region agent log
-      fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
-        body: JSON.stringify({
-          sessionId: '446f67',
-          runId: 'pre-fix',
-          hypothesisId: 'H1',
-          location: 'App.tsx:saveVisualRefs:afterPatch',
-          message: 'patch 2xx',
-          data: { selectedId },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       setVisualOpen(false);
       await loadDetail(selectedId);
-    } catch (e) {
-      // #region agent log
-      fetch('http://127.0.0.1:7473/ingest/8ded479e-3ef8-4d6a-b731-46f71676fb83', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '446f67' },
-        body: JSON.stringify({
-          sessionId: '446f67',
-          runId: 'pre-fix',
-          hypothesisId: 'H1-H5',
-          location: 'App.tsx:saveVisualRefs:catch',
-          message: 'patch failed',
-          data: {
-            isAxios: axios.isAxiosError(e),
-            status: axios.isAxiosError(e) ? e.response?.status : undefined,
-            respData: axios.isAxiosError(e) ? e.response?.data : undefined,
-            code: axios.isAxiosError(e) ? e.code : undefined,
-            msg: String((e as Error)?.message ?? e),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+    } catch {
       setErr('Gagal menyimpan referensi visual.');
     } finally {
       setVisualBusy(false);

@@ -1,32 +1,32 @@
 {
   "disease": "Influenza",
   "competency_level": "4",
-  "summary_root": "Influenza adalah infeksi saluran napas akut yang disebabkan oleh virus influenza tipe A dan B, dengan gejala utama demam dan keluhan saluran napas tidak spesifik. Diagnosis bersifat klinis dan tatalaksana umumnya simptomatis tanpa terapi antivirus spesifik.",
+  "summary_root": "Influenza adalah infeksi saluran napas akut yang disebabkan oleh virus influenza tipe A dan B, ditandai dengan demam dan gejala saluran napas tidak spesifik. Diagnosis bersifat klinis dan tatalaksana bersifat simptomatis tanpa terapi antivirus spesifik.",
   "nodes": [
     {
       "id": "root",
       "label": "Influenza",
       "type": "root",
       "level": 0,
-      "summary": "Penyakit infeksi saluran napas akut akibat virus influenza tipe A dan B, ditandai demam dan keluhan saluran napas tidak spesifik.",
+      "summary": "Penyakit infeksi saluran napas akut akibat virus influenza tipe A dan B, dengan gejala utama demam dan keluhan saluran napas.",
       "group": 0,
       "val": 20
     },
     {
-      "id": "definisi",
+      "id": "definisi_epidemiologi",
       "label": "Definisi & Epidemiologi",
       "type": "section",
       "level": 1,
-      "summary": "Influenza adalah infeksi saluran napas akut oleh virus influenza tipe A dan B, dengan gejala utama demam dan keluhan saluran napas.",
+      "summary": "Influenza adalah infeksi saluran napas akut oleh virus influenza tipe A dan B, dengan insidensi tinggi pada musim hujan/dingin.",
       "group": 1,
       "val": 12
     },
     {
       "id": "def_batasan",
-      "label": "Batasan",
+      "label": "Batasan Influenza",
       "type": "concept",
       "level": 2,
-      "summary": "Influenza merupakan penyakit infeksi saluran napas akut yang disebabkan oleh virus influenza tipe A dan B.",
+      "summary": "Influenza adalah penyakit infeksi saluran napas akut yang disebabkan oleh virus influenza tipe A dan B.",
       "group": 2,
       "val": 7
     },
@@ -35,16 +35,25 @@
       "label": "Gejala Utama",
       "type": "fact",
       "level": 3,
-      "summary": "Gejala utama influenza adalah demam dan keluhan saluran napas tidak spesifik seperti batuk, pilek, dan odinofagia.",
+      "summary": "Gejala utama berupa demam dan keluhan saluran napas tidak spesifik seperti batuk, pilek, dan odinofagia.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "etiologi_risiko",
+      "id": "def_epidemi_musim",
+      "label": "Musiman",
+      "type": "fact",
+      "level": 3,
+      "summary": "Insidensi meningkat pada musim hujan atau musim dingin.",
+      "group": 3,
+      "val": 4
+    },
+    {
+      "id": "etiologi_faktor_risiko",
       "label": "Etiologi & Faktor Risiko",
       "type": "section",
       "level": 1,
-      "summary": "Influenza disebabkan oleh virus influenza tipe A dan B, dengan risiko meningkat pada individu imunokompromais dan saat perubahan musim.",
+      "summary": "Influenza disebabkan oleh virus influenza tipe A/B, dengan risiko meningkat pada individu imun rendah dan saat perubahan musim.",
       "group": 1,
       "val": 12
     },
@@ -53,22 +62,13 @@
       "label": "Virus Influenza",
       "type": "concept",
       "level": 2,
-      "summary": "Penyebab utama adalah virus influenza tipe A dan B, termasuk subtipe khusus seperti H5N1 pada flu burung.",
+      "summary": "Penyebab utama adalah virus influenza tipe A dan B, keduanya merupakan virus RNA.",
       "group": 2,
       "val": 7
     },
     {
-      "id": "etiologi_rna",
-      "label": "Karakteristik Virus",
-      "type": "fact",
-      "level": 3,
-      "summary": "Virus influenza merupakan virus RNA.",
-      "group": 3,
-      "val": 4
-    },
-    {
       "id": "etiologi_flu_burung",
-      "label": "Flu Burung (H5N1)",
+      "label": "Flu Burung",
       "type": "fact",
       "level": 3,
       "summary": "Flu burung disebabkan oleh virus influenza tipe A H5N1.",
@@ -76,7 +76,7 @@
       "val": 4
     },
     {
-      "id": "risiko_imun",
+      "id": "faktor_risiko_imun",
       "label": "Sistem Imun Rendah",
       "type": "concept",
       "level": 2,
@@ -85,7 +85,7 @@
       "val": 7
     },
     {
-      "id": "risiko_musim",
+      "id": "faktor_risiko_musim",
       "label": "Perubahan Musim",
       "type": "concept",
       "level": 2,
@@ -94,26 +94,26 @@
       "val": 7
     },
     {
-      "id": "patogenesis",
+      "id": "patogenesis_patofisiologi",
       "label": "Patogenesis & Patofisiologi",
       "type": "section",
       "level": 1,
-      "summary": "Tidak dijelaskan secara detail dalam artikel, namun influenza menyerang saluran napas atas dan bawah melalui infeksi virus.",
+      "summary": "Virus influenza menginfeksi saluran napas atas, menyebabkan inflamasi dan gejala sistemik.",
       "group": 1,
       "val": 12
     },
     {
-      "id": "manifestasi",
+      "id": "manifestasi_klinis",
       "label": "Anamnesis & Manifestasi Klinis",
       "type": "section",
       "level": 1,
-      "summary": "Gejala influenza meliputi demam, batuk, pilek, odinofagia, nyeri kepala, bersin, malaise, dan mialgia.",
+      "summary": "Gejala influenza meliputi demam, batuk, pilek, odinofagia, malaise, dan mialgia; pada flu burung dapat disertai gangguan saluran cerna.",
       "group": 1,
       "val": 12
     },
     {
-      "id": "manifestasi_umum",
-      "label": "Manifestasi Umum",
+      "id": "anamnesis_keluhan",
+      "label": "Keluhan Utama",
       "type": "concept",
       "level": 2,
       "summary": "Keluhan utama berupa demam dan keluhan saluran napas tidak spesifik.",
@@ -121,25 +121,25 @@
       "val": 7
     },
     {
-      "id": "manifestasi_demam",
+      "id": "gejala_demam",
       "label": "Demam",
       "type": "fact",
       "level": 3,
-      "summary": "Demam sering ditemukan pada influenza, dapat menjadi keluhan utama.",
+      "summary": "Demam sering ditemukan pada influenza, dapat mencapai ≥ 38°C pada flu burung.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_batuk",
+      "id": "gejala_batuk",
       "label": "Batuk",
       "type": "fact",
       "level": 3,
-      "summary": "Batuk merupakan salah satu gejala utama influenza.",
+      "summary": "Batuk merupakan salah satu keluhan utama pada influenza.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_pilek",
+      "id": "gejala_pilek",
       "label": "Pilek",
       "type": "fact",
       "level": 3,
@@ -148,34 +148,34 @@
       "val": 4
     },
     {
-      "id": "manifestasi_odinofagia",
+      "id": "gejala_odinofagia",
       "label": "Odinofagia",
       "type": "fact",
       "level": 3,
-      "summary": "Odinofagia (nyeri menelan) dapat ditemukan pada influenza.",
+      "summary": "Nyeri menelan (odinofagia) dapat ditemukan pada pasien influenza.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_nyeri_kepala",
+      "id": "gejala_nyeri_kepala",
       "label": "Nyeri Kepala",
       "type": "fact",
       "level": 3,
-      "summary": "Nyeri kepala sering menyertai influenza.",
+      "summary": "Nyeri kepala sering ditemukan pada influenza dan flu burung.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_bersin",
+      "id": "gejala_bersin",
       "label": "Bersin",
       "type": "fact",
       "level": 3,
-      "summary": "Bersin dapat terjadi pada influenza.",
+      "summary": "Bersin dapat menyertai influenza.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_malaise",
+      "id": "gejala_malaise",
       "label": "Malaise",
       "type": "fact",
       "level": 3,
@@ -184,79 +184,43 @@
       "val": 4
     },
     {
-      "id": "manifestasi_mialgia",
+      "id": "gejala_mialgia",
       "label": "Mialgia",
       "type": "fact",
       "level": 3,
-      "summary": "Mialgia (nyeri otot) dapat menyertai influenza.",
+      "summary": "Mialgia (nyeri otot) umum pada influenza dan flu burung.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "manifestasi_flu_burung",
+      "id": "flu_burung_gejala",
       "label": "Manifestasi Flu Burung",
       "type": "concept",
       "level": 2,
-      "summary": "Flu burung sebagai bentuk berat influenza memiliki manifestasi klinis lebih berat.",
+      "summary": "Pada flu burung, gejala lebih berat dan dapat melibatkan saluran cerna.",
       "group": 2,
       "val": 7
-    },
-    {
-      "id": "flu_burung_demam",
-      "label": "Demam ≥ 38°C",
-      "type": "fact",
-      "level": 3,
-      "summary": "Pada flu burung, demam ≥ 38°C merupakan salah satu gejala utama.",
-      "group": 3,
-      "val": 4
-    },
-    {
-      "id": "flu_burung_ili",
-      "label": "Influenza-like Illness",
-      "type": "fact",
-      "level": 3,
-      "summary": "Gejala ILI: batuk, nyeri tenggorok, pilek, sesak napas.",
-      "group": 3,
-      "val": 4
-    },
-    {
-      "id": "flu_burung_nyeri_kepala",
-      "label": "Nyeri Kepala Flu Burung",
-      "type": "fact",
-      "level": 3,
-      "summary": "Nyeri kepala juga ditemukan pada flu burung.",
-      "group": 3,
-      "val": 4
-    },
-    {
-      "id": "flu_burung_myalgia",
-      "label": "Myalgia Flu Burung",
-      "type": "fact",
-      "level": 3,
-      "summary": "Myalgia (nyeri otot) pada flu burung.",
-      "group": 3,
-      "val": 4
     },
     {
       "id": "flu_burung_gangguan_cerna",
       "label": "Gangguan Saluran Cerna",
       "type": "fact",
       "level": 3,
-      "summary": "Mual, muntah, diare, konstipasi dapat terjadi pada flu burung.",
+      "summary": "Mual, muntah, diare, dan konstipasi dapat terjadi pada flu burung.",
       "group": 3,
       "val": 4
     },
     {
-      "id": "pfisik",
+      "id": "pemeriksaan_fisik",
       "label": "Pemeriksaan Fisik",
       "type": "section",
       "level": 1,
-      "summary": "Pemeriksaan fisik influenza dapat menunjukkan demam, rinore, dan edema mukosa hidung.",
+      "summary": "Pemeriksaan fisik dapat menunjukkan demam, rinore, dan edema mukosa hidung.",
       "group": 1,
       "val": 12
     },
     {
-      "id": "pfisik_demam",
+      "id": "pf_demam",
       "label": "Demam",
       "type": "concept",
       "level": 2,
@@ -265,38 +229,38 @@
       "val": 7
     },
     {
-      "id": "pfisik_rinore",
+      "id": "pf_rinore",
       "label": "Rinore",
       "type": "concept",
       "level": 2,
-      "summary": "Rinore (keluarnya cairan dari hidung) dapat ditemukan.",
+      "summary": "Keluarnya cairan dari hidung (rinore) dapat ditemukan.",
       "group": 2,
       "val": 7
     },
     {
-      "id": "pfisik_mukosa_edema",
-      "label": "Mukosa Hidung Edema",
+      "id": "pf_edema_mukosa",
+      "label": "Edema Mukosa Hidung",
       "type": "concept",
       "level": 2,
-      "summary": "Edema pada mukosa hidung dapat ditemukan pada influenza.",
+      "summary": "Mukosa hidung tampak edema (bengkak) pada pemeriksaan.",
       "group": 2,
       "val": 7
     },
     {
-      "id": "p_penunjang",
+      "id": "pemeriksaan_penunjang",
       "label": "Pemeriksaan Penunjang",
       "type": "section",
       "level": 1,
-      "summary": "Tidak ada pemeriksaan penunjang spesifik, diagnosis influenza ditegakkan secara klinis.",
+      "summary": "Tidak ada pemeriksaan penunjang spesifik; diagnosis influenza bersifat klinis.",
       "group": 1,
       "val": 12
     },
     {
-      "id": "p_penunjang_klinis",
+      "id": "pp_diagnosis_klinis",
       "label": "Diagnosis Klinis",
       "type": "concept",
       "level": 2,
-      "summary": "Diagnosis influenza ditegakkan berdasarkan gejala dan faktor risiko secara klinis.",
+      "summary": "Diagnosis influenza ditegakkan berdasarkan gejala dan faktor risiko tanpa pemeriksaan laboratorium khusus.",
       "group": 2,
       "val": 7
     },
@@ -305,21 +269,21 @@
       "label": "Diagnosis (Kriteria/Klasifikasi)",
       "type": "section",
       "level": 1,
-      "summary": "Diagnosis influenza bersifat klinis, berdasarkan gejala dan faktor risiko tanpa pemeriksaan penunjang spesifik.",
+      "summary": "Diagnosis influenza ditegakkan secara klinis berdasarkan anamnesis, pemeriksaan fisik, dan faktor risiko.",
       "group": 1,
       "val": 12
     },
     {
       "id": "dx_kriteria_klinis",
-      "label": "Kriteria Klinis",
+      "label": "Kriteria Diagnosis Klinis",
       "type": "concept",
       "level": 2,
-      "summary": "Diagnosis ditegakkan jika terdapat demam dan keluhan saluran napas tidak spesifik pada individu berisiko.",
+      "summary": "Diagnosis ditegakkan bila terdapat demam dan keluhan saluran napas tidak spesifik pada individu dengan faktor risiko.",
       "group": 2,
       "val": 7
     },
     {
-      "id": "dx_band",
+      "id": "diagnosis_banding",
       "label": "Diagnosis Banding",
       "type": "section",
       "level": 1,
@@ -328,7 +292,7 @@
       "val": 12
     },
     {
-      "id": "dx_bronkitis",
+      "id": "db_bronkitis_akut",
       "label": "Bronkitis Akut",
       "type": "concept",
       "level": 2,
@@ -337,7 +301,7 @@
       "val": 7
     },
     {
-      "id": "dx_croup",
+      "id": "db_croup",
       "label": "Croup",
       "type": "concept",
       "level": 2,
@@ -350,7 +314,7 @@
       "label": "Tatalaksana (Farmakologi & Non-Farmakologi)",
       "type": "section",
       "level": 1,
-      "summary": "Penatalaksanaan influenza bersifat simptomatis, meliputi istirahat, hidrasi, dan antipiretik.",
+      "summary": "Penatalaksanaan influenza bersifat simptomatis, meliputi istirahat, hidrasi, dan antipiretik; antibiotik tidak dianjurkan.",
       "group": 1,
       "val": 12
     },
@@ -368,7 +332,7 @@
       "label": "Istirahat",
       "type": "fact",
       "level": 3,
-      "summary": "Pasien dianjurkan istirahat cukup untuk mempercepat pemulihan.",
+      "summary": "Pasien dianjurkan untuk istirahat cukup selama masa sakit.",
       "group": 3,
       "val": 4
     },
@@ -377,7 +341,7 @@
       "label": "Hidrasi",
       "type": "fact",
       "level": 3,
-      "summary": "Penting menjaga hidrasi dengan minum cukup cairan.",
+      "summary": "Pemberian cairan yang cukup untuk mencegah dehidrasi.",
       "group": 3,
       "val": 4
     },
@@ -404,7 +368,7 @@
       "label": "Antibiotik",
       "type": "concept",
       "level": 2,
-      "summary": "Antibiotik tidak dianjurkan karena influenza disebabkan oleh virus.",
+      "summary": "Pemberian antibiotik tidak dianjurkan karena penyebabnya adalah virus.",
       "group": 2,
       "val": 7
     },
@@ -413,7 +377,7 @@
       "label": "Komplikasi",
       "type": "section",
       "level": 1,
-      "summary": "Komplikasi tidak dijelaskan secara spesifik dalam artikel, namun influenza dapat menyebabkan infeksi sekunder atau memperberat penyakit kronis.",
+      "summary": "Komplikasi tidak dibahas secara spesifik dalam artikel, namun influenza berat dapat menyebabkan pneumonia atau komplikasi lain.",
       "group": 1,
       "val": 12
     },
@@ -422,7 +386,7 @@
       "label": "Prognosis & Pencegahan",
       "type": "section",
       "level": 1,
-      "summary": "Prognosis influenza umumnya baik pada individu sehat, pencegahan spesifik tidak dijelaskan dalam artikel.",
+      "summary": "Prognosis umumnya baik pada individu sehat; pencegahan dengan menjaga daya tahan tubuh dan menghindari paparan.",
       "group": 1,
       "val": 12
     }
@@ -430,131 +394,115 @@
   "edges": [
     {
       "source": "root",
-      "target": "definisi"
+      "target": "definisi_epidemiologi"
     },
     {
-      "source": "definisi",
+      "source": "definisi_epidemiologi",
       "target": "def_batasan"
     },
     {
-      "source": "definisi",
+      "source": "def_batasan",
       "target": "def_gejala_utama"
     },
     {
+      "source": "def_batasan",
+      "target": "def_epidemi_musim"
+    },
+    {
       "source": "root",
-      "target": "etiologi_risiko"
+      "target": "etiologi_faktor_risiko"
     },
     {
-      "source": "etiologi_risiko",
+      "source": "etiologi_faktor_risiko",
       "target": "etiologi_virus"
-    },
-    {
-      "source": "etiologi_virus",
-      "target": "etiologi_rna"
     },
     {
       "source": "etiologi_virus",
       "target": "etiologi_flu_burung"
     },
     {
-      "source": "etiologi_risiko",
-      "target": "risiko_imun"
+      "source": "etiologi_faktor_risiko",
+      "target": "faktor_risiko_imun"
     },
     {
-      "source": "etiologi_risiko",
-      "target": "risiko_musim"
-    },
-    {
-      "source": "root",
-      "target": "patogenesis"
+      "source": "etiologi_faktor_risiko",
+      "target": "faktor_risiko_musim"
     },
     {
       "source": "root",
-      "target": "manifestasi"
+      "target": "patogenesis_patofisiologi"
     },
     {
-      "source": "manifestasi",
-      "target": "manifestasi_umum"
+      "source": "root",
+      "target": "manifestasi_klinis"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_demam"
+      "source": "manifestasi_klinis",
+      "target": "anamnesis_keluhan"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_batuk"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_demam"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_pilek"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_batuk"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_odinofagia"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_pilek"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_nyeri_kepala"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_odinofagia"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_bersin"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_nyeri_kepala"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_malaise"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_bersin"
     },
     {
-      "source": "manifestasi_umum",
-      "target": "manifestasi_mialgia"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_malaise"
     },
     {
-      "source": "manifestasi",
-      "target": "manifestasi_flu_burung"
+      "source": "anamnesis_keluhan",
+      "target": "gejala_mialgia"
     },
     {
-      "source": "manifestasi_flu_burung",
-      "target": "flu_burung_demam"
+      "source": "manifestasi_klinis",
+      "target": "flu_burung_gejala"
     },
     {
-      "source": "manifestasi_flu_burung",
-      "target": "flu_burung_ili"
-    },
-    {
-      "source": "manifestasi_flu_burung",
-      "target": "flu_burung_nyeri_kepala"
-    },
-    {
-      "source": "manifestasi_flu_burung",
-      "target": "flu_burung_myalgia"
-    },
-    {
-      "source": "manifestasi_flu_burung",
+      "source": "flu_burung_gejala",
       "target": "flu_burung_gangguan_cerna"
     },
     {
       "source": "root",
-      "target": "pfisik"
+      "target": "pemeriksaan_fisik"
     },
     {
-      "source": "pfisik",
-      "target": "pfisik_demam"
+      "source": "pemeriksaan_fisik",
+      "target": "pf_demam"
     },
     {
-      "source": "pfisik",
-      "target": "pfisik_rinore"
+      "source": "pemeriksaan_fisik",
+      "target": "pf_rinore"
     },
     {
-      "source": "pfisik",
-      "target": "pfisik_mukosa_edema"
+      "source": "pemeriksaan_fisik",
+      "target": "pf_edema_mukosa"
     },
     {
       "source": "root",
-      "target": "p_penunjang"
+      "target": "pemeriksaan_penunjang"
     },
     {
-      "source": "p_penunjang",
-      "target": "p_penunjang_klinis"
+      "source": "pemeriksaan_penunjang",
+      "target": "pp_diagnosis_klinis"
     },
     {
       "source": "root",
@@ -566,15 +514,15 @@
     },
     {
       "source": "root",
-      "target": "dx_band"
+      "target": "diagnosis_banding"
     },
     {
-      "source": "dx_band",
-      "target": "dx_bronkitis"
+      "source": "diagnosis_banding",
+      "target": "db_bronkitis_akut"
     },
     {
-      "source": "dx_band",
-      "target": "dx_croup"
+      "source": "diagnosis_banding",
+      "target": "db_croup"
     },
     {
       "source": "root",
@@ -617,13 +565,13 @@
     {
       "image_url": "",
       "heading": "",
-      "description": ""
+      "description": "Tidak ada gambar atau bagan spesifik yang disebutkan dalam artikel."
     }
   ],
   "key_takeaways": [
-    "Influenza adalah infeksi saluran napas akut akibat virus influenza tipe A dan B, dengan gejala utama demam dan keluhan saluran napas tidak spesifik.",
-    "Diagnosis influenza bersifat klinis, tanpa pemeriksaan penunjang spesifik, dan tatalaksana utamanya adalah simptomatis.",
-    "Antibiotik tidak dianjurkan pada influenza karena penyebabnya adalah virus, dan terapi antivirus spesifik tidak direkomendasikan pada evidence ini."
+    "Influenza adalah infeksi saluran napas akut yang disebabkan oleh virus influenza tipe A dan B.",
+    "Diagnosis influenza bersifat klinis berdasarkan gejala dan faktor risiko, tanpa pemeriksaan penunjang spesifik.",
+    "Tatalaksana influenza bersifat simptomatis, tidak dianjurkan pemberian antibiotik maupun antivirus spesifik."
   ],
-  "saved_at": "2026-04-16T21:57:35.295251+00:00"
+  "saved_at": "2026-04-17T08:14:30.542196+00:00"
 }
