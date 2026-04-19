@@ -775,3 +775,74 @@ Tulis SATU artikel Markdown lengkap hasil penggabungan kedua bagian di atas."""
             lines = lines[:-1]
         text = "\n".join(lines)
     return text.strip()
+
+
+def ask_copilot_for_list(
+    topics_data: dict[str, Any],
+    github_token: str,
+) -> dict[str, Any]:
+    """
+    Format khusus untuk query enumeratif (daftar penyakit/topik).
+    Output: JSON dengan sections berisi numbered list per sumber.
+    Fallback ke format manual jika Copilot gagal.
+    """
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing or empty")
+
+    # Build sources text
+    sources_text = ""
+    for src in topics_data.get("sources", []):
+        sources_text += f"\n### {src['source_name']}\n"
+        for t in src.get("topics", []):
+            sources_text += f"- {t['heading']}\n"
+
+    system_prompt = """Anda adalah asisten medical RAG. Berikan daftar lengkap topik/penyakit yang tersedia dalam knowledge base.
+
+ATURAN:
+- Format output: JSON valid TANPA markdown fence
+- Kelompokkan berdasarkan sumber
+- Buat numbered list yang rapi
+- Tambahkan ringkasan singkat di awal
+
+FORMAT OUTPUT:
+{
+  "disease": "Daftar Topik Knowledge Base",
+  "sections": [
+    {
+      "title": "Nama Sumber",
+      "markdown": "Terdapat N topik tersedia:\\n1. **Topik 1**\\n2. **Topik 2**\\n..."
+    }
+  ],
+  "citations": []
+}"""
+
+    copilot_token = get_copilot_token(github_token)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Topik tersedia dalam knowledge base:\n{sources_text}"},
+    ]
+
+    try:
+        raw = _call_copilot(copilot_token, messages)
+        result = _parse_json_response(raw)
+        result.setdefault("grounded", True)
+        return result
+    except Exception as e:
+        print(f"[WARN] ask_copilot_for_list fallback: {e}")
+        # Fallback: format manual tanpa Copilot
+        sections = []
+        total = 0
+        for src in topics_data.get("sources", []):
+            count = len(src.get("topics", []))
+            total += count
+            topics_md = f"Terdapat **{count} topik** tersedia:\n" + "\n".join(
+                f"{i+1}. **{t['heading']}**"
+                for i, t in enumerate(src.get("topics", []))
+            )
+            sections.append({"title": src["source_name"], "markdown": topics_md})
+        return {
+            "disease": f"Daftar Topik Knowledge Base ({total} topik dari {len(sections)} sumber)",
+            "sections": sections,
+            "citations": [],
+            "grounded": True,
+        }

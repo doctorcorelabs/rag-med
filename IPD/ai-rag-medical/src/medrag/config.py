@@ -27,3 +27,29 @@ MATERI_PAGE_GLOB = "**/pages/page-*/markdown.md"
 
 EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Path untuk stase dinamis (dibuat via UI Admin)
+STASE_OVERRIDES_PATH = PROJECT_ROOT / "stase_overrides.json"
+
+
+def load_stase_roots() -> list[tuple[str, str]]:
+    """
+    Gabungkan STASE_MATERI_ROOTS (hardcoded) + stase_overrides.json (dinamis dari UI).
+    Return list of (slug, materi_dir_relative_to_workspace_root).
+
+    Digunakan oleh indexer.py agar stase baru otomatis ter-index
+    tanpa perlu mengubah kode Python.
+    """
+    import json as _json
+
+    base = list(STASE_MATERI_ROOTS)
+    if STASE_OVERRIDES_PATH.exists():
+        try:
+            overrides = _json.loads(STASE_OVERRIDES_PATH.read_text(encoding="utf-8"))
+            for entry in overrides.get("stases", []):
+                pair = (entry["slug"], entry["materi_dir"])
+                if pair not in base:
+                    base.append(pair)
+        except Exception:
+            pass
+    return base

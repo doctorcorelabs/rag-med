@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Literal, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -16,6 +18,7 @@ from .config import DEFAULT_DB_PATH, DEFAULT_WORKSPACE_ROOT
 from .retriever import (
     related_images, search_chunks, synthesize_answer, get_knowledge_graph,
     _extract_disease_name, _extract_topic_intent, _is_detail_request,
+    detect_list_intent, get_topics_from_db,
 )
 from .copilot_client import (
     ask_copilot_adaptive,
@@ -23,6 +26,12 @@ from .copilot_client import (
     merge_two_markdown_articles,
     refine_markdown_with_instruction,
 )
+from .source_manager import (
+    list_sources, create_source, upload_page as sm_upload_page,
+    upload_zip, delete_source, get_source_tree, get_page_content,
+)
+from .stase_manager import create_stase, delete_stase, list_all_stases
+from .indexer import build_index_for_source, build_index
 from .library_rag_hook import maybe_index_article_for_rag
 from . import library as library_mod
 from .library import (
@@ -61,6 +70,22 @@ class SearchDiseaseRequest(BaseModel):
 class ImageRequest(BaseModel):
     disease_name: str = Field(min_length=2)
     limit: int = Field(default=3, ge=1, le=10)
+
+
+# ── Admin Models ─────────────────────────────────────────────────────────────
+
+class CreateSourceRequest(BaseModel):
+    source_name: str = Field(min_length=3, description="Harus diawali '(Sumber) '")
+
+
+class UploadPageRequest(BaseModel):
+    page_no: int = Field(ge=1)
+    markdown: str = Field(min_length=1)
+
+
+class CreateStaseRequest(BaseModel):
+    slug: str = Field(min_length=2, pattern=r"^[a-z][a-z0-9_-]*$")
+    display_name: str = Field(min_length=2)
 
 
 class LibraryGenerateRequest(BaseModel):
@@ -132,7 +157,7 @@ class LibraryMergeMarkdownRequest(BaseModel):
 
 
 def create_app(db_path: Path | None = None) -> FastAPI:
-    app = FastAPI(title="Medical RAG API", version="3.0.0")
+    app = FastAPI(title="Medical RAG API", version="3.1.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -192,13 +217,95 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "db_path": str(database), "version": "3.0.0"}
+        return {"status": "ok", "db_path": str(database), "version": "3.1.0"}
+
+    # ── List Topics (Enumerative) ─────────────────────────────────────────────
+
+    @app.get("/list_topics")
+    def list_topics_endpoint(slug: str | None = None) -> dict:
+        """
+        Enumerasi semua topik/heading dari knowledge base, dikelompokkan per sumber.
+        Tidak menggunakan search — langsung baca metadata DB.
+        """
+        return get_topics_from_db(database, stase_slug=slug)
+
+    @app.get("/list_topics/catalog")
+    def list_topics_catalog(slug: str = "ipd") -> dict:
+        """
+        Daftar lengkap penyakit dari katalog CSV (termasuk yang belum punya artikel).
+        Berguna untuk menampilkan progress coverage RAG.
+        """
+        conn = library_mod._connect()
+        try:
+            library_mod.init_library_schema(conn)
+            st = library_mod.get_stase_by_slug(conn, slug)
+            if not st:
+                raise HTTPException(status_code=404, detail=f"Stase '{slug}' tidak ditemukan")
+            diseases = library_mod.get_disease_list(conn, st["id"])
+            # Enrich dengan info apakah sudah ada chunk di DB
+            indexed_names = set()
+            try:
+                import sqlite3 as _sq
+                c = _sq.connect(database)
+                for r in c.execute("SELECT DISTINCT source_name FROM chunks WHERE stase_slug = ?", (slug,)):
+                    indexed_names.add(r[0].lower())
+                c.close()
+            except Exception:
+                pass
+            for d in diseases:
+                d["has_rag_content"] = any(
+                    d["name"].lower() in src for src in indexed_names
+                )
+            return {
+                "stase": {"slug": st["slug"], "display_name": st["display_name"]},
+                "diseases": diseases,
+                "total": len(diseases),
+                "with_article": sum(1 for d in diseases if d.get("status") not in ("missing", None)),
+            }
+        finally:
+            conn.close()
 
     @app.post("/search_disease_context")
     def search_disease_context(payload: SearchDiseaseRequest) -> dict:
         history_dicts: list[dict[str, Any]] = [
             {"role": h.role, "content": h.content} for h in payload.chat_history
         ]
+
+        # ── Cek list intent sebelum semantic search ────────────────────────
+        if detect_list_intent(payload.disease_name):
+            topics = get_topics_from_db(database)
+            # Build simple structured answer for list queries
+            sections = []
+            for src in topics.get("sources", []):
+                topics_md = "\n".join(
+                    f"{i+1}. **{t['heading']}**"
+                    for i, t in enumerate(src.get("topics", []))
+                )
+                sections.append({"title": src["source_name"], "markdown": topics_md})
+            list_answer: dict[str, Any] = {
+                "disease": "Daftar Topik Knowledge Base",
+                "sections": sections,
+                "citations": [],
+                "grounded": True,
+            }
+            github_token = os.getenv("GITHUB_TOKEN")
+            if github_token:
+                from .copilot_client import ask_copilot_for_list
+                try:
+                    list_answer = ask_copilot_for_list(topics, github_token)
+                except Exception:
+                    pass  # fallback ke list_answer manual di atas
+            return {
+                "query": payload.disease_name,
+                "query_analysis": {"is_list_intent": True},
+                "detail_level": payload.detail_level,
+                "evidence_count": 0,
+                "evidence": [],
+                "draft_answer": list_answer,
+                "images": [],
+                "topics": topics,
+                "note": "Query terdeteksi sebagai permintaan daftar; mengembalikan enumerasi dari knowledge base.",
+            }
 
         detected_disease = _extract_disease_name(payload.disease_name)
         detected_intent = _extract_topic_intent(payload.disease_name)
@@ -769,6 +876,144 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             return {"ok": True}
         finally:
             conn.close()
+
+    # ══ Admin: Source Manager ══════════════════════════════════════════════════════════════════════
+
+    @app.get("/admin/stases/{slug}/sources")
+    def admin_list_sources(slug: str) -> dict:
+        """List semua folder sumber di Materi/ untuk stase ini + index status."""
+        try:
+            sources = list_sources(slug)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return {"slug": slug, "sources": sources, "count": len(sources)}
+
+    @app.get("/admin/stases/{slug}/sources/{source_name}")
+    def admin_get_source_tree(slug: str, source_name: str) -> dict:
+        """Detail tree satu sumber: semua page + file yang ada."""
+        try:
+            return get_source_tree(slug, source_name)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @app.get("/admin/stases/{slug}/sources/{source_name}/pages/{page_no}")
+    def admin_get_page(slug: str, source_name: str, page_no: int) -> dict:
+        """Baca konten markdown satu halaman."""
+        content = get_page_content(slug, source_name, page_no)
+        if content is None:
+            raise HTTPException(status_code=404, detail=f"Halaman {page_no} tidak ditemukan")
+        return {"page_no": page_no, "markdown": content, "chars": len(content)}
+
+    @app.post("/admin/stases/{slug}/sources")
+    def admin_create_source(slug: str, payload: CreateSourceRequest) -> dict:
+        """Buat folder sumber baru dengan template page-1/markdown.md."""
+        try:
+            result = create_source(slug, payload.source_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True, **result}
+
+    @app.post("/admin/stases/{slug}/sources/{source_name}/pages/{page_no}")
+    def admin_upload_page(
+        slug: str, source_name: str, page_no: int, payload: UploadPageRequest,
+    ) -> dict:
+        """Upload / update konten markdown satu halaman tertentu."""
+        try:
+            result = sm_upload_page(slug, source_name, page_no, payload.markdown)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return {"ok": True, **result}
+
+    @app.post("/admin/stases/{slug}/sources/{source_name}/upload_zip")
+    async def admin_upload_zip(
+        slug: str,
+        source_name: str,
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+    ) -> dict:
+        """Upload ZIP berisi batch pages. Auto-trigger partial re-index."""
+        content = await file.read()
+        try:
+            result = upload_zip(slug, source_name, content)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        background_tasks.add_task(
+            _run_partial_reindex_bg, slug, source_name
+        )
+        return {"ok": True, **result, "reindex_queued": True}
+
+    @app.delete("/admin/stases/{slug}/sources/{source_name}")
+    def admin_delete_source(slug: str, source_name: str) -> dict:
+        """Hapus folder sumber beserta isinya (tidak bisa dibatalkan)."""
+        try:
+            delete_source(slug, source_name)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        return {"ok": True, "deleted": source_name}
+
+    @app.post("/admin/reindex")
+    def admin_trigger_reindex(
+        background_tasks: BackgroundTasks,
+        slug: str | None = None,
+        source_name: str | None = None,
+        skip_vector: bool = True,
+    ) -> dict:
+        """
+        Trigger rebuild index:
+        - Tanpa params → full rebuild semua sumber
+        - ?slug=X → rebuild semua sumber di stase X
+        - ?slug=X&source_name=Y → partial rebuild satu sumber
+        """
+        from fastapi import BackgroundTasks
+        if source_name and slug:
+            background_tasks.add_task(
+                _run_partial_reindex_bg, slug, source_name
+            )
+            return {"ok": True, "mode": "partial", "target": source_name, "reindex_queued": True}
+        else:
+            background_tasks.add_task(_run_full_reindex_bg, skip_vector)
+            return {"ok": True, "mode": "full", "reindex_queued": True}
+
+    def _run_partial_reindex_bg(slug: str, source_name: str) -> None:
+        try:
+            result = build_index_for_source(
+                source_name, slug, DEFAULT_WORKSPACE_ROOT, database
+            )
+            print(f"[Admin ReIndex] {source_name}: {result}")
+        except Exception as e:
+            print(f"[Admin ReIndex ERROR] {source_name}: {e}")
+
+    def _run_full_reindex_bg(skip_vector: bool) -> None:
+        try:
+            result = build_index(db_path=database, skip_vector=skip_vector)
+            print(f"[Admin ReIndex Full]: {result}")
+        except Exception as e:
+            print(f"[Admin ReIndex Full ERROR]: {e}")
+
+    # ══ Admin: Stase Manager ══════════════════════════════════════════════════════════════════════
+
+    @app.get("/admin/stases")
+    def admin_list_stases() -> dict:
+        """List semua stase (hardcoded + stase_overrides.json)."""
+        return {"stases": list_all_stases()}
+
+    @app.post("/admin/stases")
+    def admin_create_stase(payload: CreateStaseRequest) -> dict:
+        """Buat stase baru: folder, CSV placeholder, register DB + overrides.json."""
+        try:
+            result = create_stase(payload.slug, payload.display_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True, **result}
+
+    @app.delete("/admin/stases/{slug}")
+    def admin_delete_stase(slug: str) -> dict:
+        """Hapus stase dari registry. TIDAK menghapus folder materi."""
+        try:
+            delete_stase(slug)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True, "deleted": slug}
 
     return app
 

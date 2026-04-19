@@ -137,7 +137,7 @@ function imageItemHasStableRef(img: ImageItem): boolean {
   );
 }
 
-type ActiveView = 'chat' | 'library' | 'kg' | 'analytics';
+type ActiveView = 'chat' | 'library' | 'kg' | 'analytics' | 'admin';
 
 // ─── RESPONSIVE HOOKS ───────────────────────────────────────────────────────
 function useScreenSize() {
@@ -156,6 +156,7 @@ const NAV_ITEMS: { icon: string; label: string; id: ActiveView }[] = [
   { icon: 'book', label: 'Library', id: 'library' },
   { icon: 'hub', label: 'KG', id: 'kg' },
   { icon: 'query_stats', label: 'Analytics', id: 'analytics' },
+  { icon: 'admin_panel_settings', label: 'Admin', id: 'admin' },
 ];
 
 function MobileBottomNav({ activeView, onChangeView }: { activeView: ActiveView; onChangeView: (v: ActiveView) => void }) {
@@ -2057,6 +2058,441 @@ export default function App() {
     );
   };
 
+
+// ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
+
+type AdminSource = {
+  source_name: string;
+  page_count: number;
+  chunk_count: number;
+  indexed: boolean;
+  path: string;
+};
+
+type AdminStase = {
+  slug: string;
+  display_name: string;
+  dirname: string;
+  materi_dir: string;
+  materi_exists: boolean;
+  is_builtin: boolean;
+  disease_count?: number;
+};
+
+function AdminPanel() {
+  const [tab, setTab] = useState<'sources' | 'stases'>('sources');
+
+  // Source Manager state
+  const [staseSlug, setStaseSlug] = useState('ipd');
+  const [staseList, setStaseList] = useState<AdminStase[]>([]);
+  const [sources, setSources] = useState<AdminSource[]>([]);
+  const [loadingSrc, setLoadingSrc] = useState(false);
+  const [newSourceName, setNewSourceName] = useState('(Sumber) ');
+  const [createMsg, setCreateMsg] = useState<string | null>(null);
+
+  // Upload ZIP state
+  const [uploadSourceName, setUploadSourceName] = useState('(Sumber) ');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+
+  // Per-page upload state
+  const [pageSourceName, setPageSourceName] = useState('');
+  const [pageNo, setPageNo] = useState(1);
+  const [pageContent, setPageContent] = useState('');
+  const [savingPage, setSavingPage] = useState(false);
+  const [pageMsg, setPageMsg] = useState<string | null>(null);
+
+  // Reindex state
+  const [reindexing, setReindexing] = useState(false);
+  const [reindexMsg, setReindexMsg] = useState<string | null>(null);
+
+  // Stase Manager state
+  const [newSlug, setNewSlug] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [creatingStase, setCreatingStase] = useState(false);
+  const [staseMsg, setStaseMsg] = useState<string | null>(null);
+
+  // Load stases + sources
+  useEffect(() => {
+    axios.get<{ stases: AdminStase[] }>(`${API_URL}/admin/stases`)
+      .then(r => setStaseList(r.data.stases || []))
+      .catch(() => {});
+  }, []);
+
+  const loadSources = (slug: string) => {
+    setLoadingSrc(true);
+    axios.get<{ sources: AdminSource[] }>(`${API_URL}/admin/stases/${slug}/sources`)
+      .then(r => setSources(r.data.sources || []))
+      .catch(() => setSources([]))
+      .finally(() => setLoadingSrc(false));
+  };
+
+  useEffect(() => { loadSources(staseSlug); }, [staseSlug]);
+
+  const handleCreateSource = async () => {
+    if (!newSourceName.startsWith('(Sumber) ') || newSourceName.trim().length < 12) {
+      setCreateMsg('Nama harus: (Sumber) XX Nama'); return;
+    }
+    try {
+      await axios.post(`${API_URL}/admin/stases/${staseSlug}/sources`, { source_name: newSourceName });
+      setCreateMsg('✅ Berhasil dibuat!');
+      loadSources(staseSlug);
+      setNewSourceName('(Sumber) ');
+    } catch (e: any) {
+      setCreateMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+    }
+    setTimeout(() => setCreateMsg(null), 4000);
+  };
+
+  const handleUploadZip = async () => {
+    if (!uploadFile || !uploadSourceName.startsWith('(Sumber) ')) {
+      setUploadMsg('Pilih file ZIP dan nama sumber yang valid'); return;
+    }
+    setUploading(true);
+    const form = new FormData();
+    form.append('file', uploadFile);
+    try {
+      const r = await axios.post(`${API_URL}/admin/stases/${staseSlug}/sources/${encodeURIComponent(uploadSourceName)}/upload_zip`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setUploadMsg(`✅ ${r.data.pages_uploaded} halaman diupload! Re-index dimulai...`);
+      setTimeout(() => loadSources(staseSlug), 3000);
+      setUploadFile(null);
+    } catch (e: any) {
+      setUploadMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadMsg(null), 5000);
+    }
+  };
+
+  const handleUploadPage = async () => {
+    if (!pageSourceName || !pageContent) { setPageMsg('Isi semua field'); return; }
+    setSavingPage(true);
+    try {
+      await axios.post(`${API_URL}/admin/stases/${staseSlug}/sources/${encodeURIComponent(pageSourceName)}/pages/${pageNo}`, {
+        page_no: pageNo, markdown: pageContent,
+      });
+      setPageMsg(`✅ Halaman ${pageNo} tersimpan!`);
+    } catch (e: any) {
+      setPageMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+    } finally {
+      setSavingPage(false);
+      setTimeout(() => setPageMsg(null), 4000);
+    }
+  };
+
+  const handleDeleteSource = async (sourceName: string) => {
+    if (!window.confirm(`Hapus "${sourceName}"? Tindakan ini tidak dapat dibatalkan.`)) return;
+    try {
+      await axios.delete(`${API_URL}/admin/stases/${staseSlug}/sources/${encodeURIComponent(sourceName)}`);
+      loadSources(staseSlug);
+    } catch (e: any) { alert(`Gagal: ${e?.response?.data?.detail ?? e.message}`); }
+  };
+
+  const handleReindex = async (sourceName?: string) => {
+    setReindexing(true);
+    const params: Record<string, string> = { slug: staseSlug };
+    if (sourceName) params['source_name'] = sourceName;
+    try {
+      await axios.post(`${API_URL}/admin/reindex`, null, { params });
+      setReindexMsg(`✅ Re-index ${sourceName ?? 'semua sumber'} dimulai!`);
+      setTimeout(() => loadSources(staseSlug), 5000);
+    } catch (e: any) {
+      setReindexMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+    } finally {
+      setReindexing(false);
+      setTimeout(() => setReindexMsg(null), 5000);
+    }
+  };
+
+  const handleCreateStase = async () => {
+    if (!newSlug || !newDisplayName) { setStaseMsg('Isi slug dan nama stase'); return; }
+    setCreatingStase(true);
+    try {
+      await axios.post(`${API_URL}/admin/stases`, { slug: newSlug, display_name: newDisplayName });
+      setStaseMsg(`✅ Stase "${newDisplayName}" berhasil dibuat!`);
+      const r = await axios.get<{ stases: AdminStase[] }>(`${API_URL}/admin/stases`);
+      setStaseList(r.data.stases || []);
+      setNewSlug(''); setNewDisplayName('');
+    } catch (e: any) {
+      setStaseMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+    } finally {
+      setCreatingStase(false);
+      setTimeout(() => setStaseMsg(null), 4000);
+    }
+  };
+
+  const handleDeleteStase = async (slug: string) => {
+    if (!window.confirm(`Hapus stase "${slug}" dari registry? Folder materi tidak akan dihapus.`)) return;
+    try {
+      await axios.delete(`${API_URL}/admin/stases/${slug}`);
+      const r = await axios.get<{ stases: AdminStase[] }>(`${API_URL}/admin/stases`);
+      setStaseList(r.data.stases || []);
+    } catch (e: any) { alert(`Gagal: ${e?.response?.data?.detail ?? e.message}`); }
+  };
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      {/* Header */}
+      <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0 bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-950/20 dark:to-indigo-950/20">
+        <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+          <span className="material-symbols-outlined text-violet-500">admin_panel_settings</span>
+          Admin Panel
+        </h2>
+        <p className="text-xs text-slate-500 mt-0.5">Kelola sumber materi dan stase knowledge base</p>
+      </div>
+
+      {/* Tabs */}
+      <div className="px-6 pt-4 shrink-0 flex gap-2 border-b border-slate-100 dark:border-slate-800">
+        {[
+          { id: 'sources' as const, icon: 'folder_open', label: 'Source Manager' },
+          { id: 'stases' as const, icon: 'school', label: 'Stase Manager' },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium rounded-t-xl transition-all border-b-2 ${
+              tab === t.id
+                ? 'border-violet-500 text-violet-600 bg-violet-50 dark:bg-violet-900/20'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}>
+            <span className="material-symbols-outlined text-[16px]">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* ── SOURCE MANAGER TAB ── */}
+        {tab === 'sources' && (
+          <>
+            {/* Stase selector */}
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest shrink-0">Stase:</label>
+              <select value={staseSlug} onChange={e => setStaseSlug(e.target.value)}
+                className="text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-violet-400">
+                {staseList.length > 0
+                  ? staseList.map(s => <option key={s.slug} value={s.slug}>{s.display_name} ({s.slug})</option>)
+                  : <option value="ipd">Stase IPD (ipd)</option>
+                }
+              </select>
+            </div>
+
+            {/* Sources list */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[16px] text-violet-500">source</span>
+                  Sumber Terindeks ({sources.length})
+                </h3>
+                <button onClick={() => handleReindex()} disabled={reindexing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-violet-600 text-white rounded-xl hover:bg-violet-700 transition-all font-medium disabled:opacity-60">
+                  <span className="material-symbols-outlined text-[13px]">{reindexing ? 'sync' : 'refresh'}</span>
+                  {reindexing ? 'Indexing...' : 'Re-index Semua'}
+                </button>
+              </div>
+              {reindexMsg && (
+                <div className="px-4 py-2 text-xs font-medium bg-violet-50 text-violet-700 border-b border-violet-100">{reindexMsg}</div>
+              )}
+              {loadingSrc ? (
+                <div className="flex items-center justify-center py-10"><div className="w-6 h-6 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" /></div>
+              ) : sources.length === 0 ? (
+                <div className="text-center py-10 text-slate-400 text-sm">Belum ada sumber di stase ini</div>
+              ) : (
+                <div className="divide-y divide-slate-50 dark:divide-slate-800">
+                  {sources.map(src => (
+                    <div key={src.source_name} className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                      <span className={`material-symbols-outlined text-[20px] shrink-0 ${src.indexed ? 'text-emerald-500' : 'text-slate-300'}`} style={{ fontVariationSettings: "'FILL' 1" }}>
+                        {src.indexed ? 'check_circle' : 'radio_button_unchecked'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">{src.source_name}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {src.page_count} halaman
+                          {src.indexed && <span className="ml-2 text-emerald-600 font-medium">· {src.chunk_count} chunks ✅</span>}
+                          {!src.indexed && <span className="ml-2 text-amber-500">· Belum diindeks</span>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={() => handleReindex(src.source_name)} disabled={reindexing}
+                          title="Re-index sumber ini"
+                          className="p-1.5 text-slate-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-all">
+                          <span className="material-symbols-outlined text-[16px]">refresh</span>
+                        </button>
+                        <button onClick={() => handleDeleteSource(src.source_name)}
+                          title="Hapus sumber"
+                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
+                          <span className="material-symbols-outlined text-[16px]">delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Create source */}
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
+                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 mb-3">
+                  <span className="material-symbols-outlined text-[16px] text-violet-500">create_new_folder</span>
+                  Buat Sumber Baru
+                </h3>
+                <div className="space-y-2">
+                  <input value={newSourceName} onChange={e => setNewSourceName(e.target.value)}
+                    placeholder="(Sumber) A3 Nama Buku"
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400" />
+                  <p className="text-[10px] text-slate-400">Format: (Sumber) {'{Kode}'} {'{Nama Singkat}'}</p>
+                  <button onClick={handleCreateSource}
+                    className="w-full py-2 bg-violet-600 text-white text-sm font-medium rounded-xl hover:bg-violet-700 transition-all">
+                    Buat Folder Sumber
+                  </button>
+                  {createMsg && <p className="text-xs font-medium text-center" style={{ color: createMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }}>{createMsg}</p>}
+                </div>
+              </div>
+
+              {/* Upload ZIP */}
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
+                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 mb-3">
+                  <span className="material-symbols-outlined text-[16px] text-violet-500">upload_file</span>
+                  Upload ZIP (Bulk Pages)
+                </h3>
+                <div className="space-y-2">
+                  <input value={uploadSourceName} onChange={e => setUploadSourceName(e.target.value)}
+                    placeholder="(Sumber) A3 Nama Buku"
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400" />
+                  <input type="file" accept=".zip" onChange={e => setUploadFile(e.target.files?.[0] ?? null)}
+                    className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-violet-50 file:text-violet-700 file:font-medium file:text-xs hover:file:bg-violet-100 cursor-pointer" />
+                  <p className="text-[10px] text-slate-400">Format ZIP: page-1/markdown.md, page-2/markdown.md, ...</p>
+                  <button onClick={handleUploadZip} disabled={uploading || !uploadFile}
+                    className="w-full py-2 bg-violet-600 text-white text-sm font-medium rounded-xl hover:bg-violet-700 transition-all disabled:opacity-60 flex items-center justify-center gap-1.5">
+                    <span className="material-symbols-outlined text-[15px]">{uploading ? 'sync' : 'cloud_upload'}</span>
+                    {uploading ? 'Mengupload...' : 'Upload & Index Otomatis'}
+                  </button>
+                  {uploadMsg && <p className="text-xs font-medium text-center" style={{ color: uploadMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }}>{uploadMsg}</p>}
+                </div>
+              </div>
+            </div>
+
+            {/* Per-page upload */}
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 mb-3">
+                <span className="material-symbols-outlined text-[16px] text-violet-500">edit_note</span>
+                Upload Per Halaman
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <select value={pageSourceName} onChange={e => setPageSourceName(e.target.value)}
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400">
+                    <option value="">Pilih sumber...</option>
+                    {sources.map(s => <option key={s.source_name} value={s.source_name}>{s.source_name}</option>)}
+                  </select>
+                  <div className="flex gap-2 items-center">
+                    <label className="text-xs text-slate-500 shrink-0">Hal.</label>
+                    <input type="number" value={pageNo} min={1} onChange={e => setPageNo(parseInt(e.target.value) || 1)}
+                      className="w-20 text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400" />
+                  </div>
+                  <button onClick={handleUploadPage} disabled={savingPage || !pageSourceName || !pageContent}
+                    className="w-full py-2 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-700 transition-all disabled:opacity-60">
+                    {savingPage ? 'Menyimpan...' : 'Simpan Halaman'}
+                  </button>
+                  {pageMsg && <p className="text-xs font-medium" style={{ color: pageMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }}>{pageMsg}</p>}
+                </div>
+                <textarea value={pageContent} onChange={e => setPageContent(e.target.value)}
+                  placeholder="# Judul Halaman&#10;&#10;Konten markdown halaman di sini..."
+                  rows={6}
+                  className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400 resize-none font-mono" />
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ── STASE MANAGER TAB ── */}
+        {tab === 'stases' && (
+          <>
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800">
+                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[16px] text-violet-500">school</span>
+                  Stase Terdaftar ({staseList.length})
+                </h3>
+              </div>
+              {staseList.length === 0 ? (
+                <div className="text-center py-10 text-slate-400 text-sm">Memuat data stase...</div>
+              ) : (
+                <div className="divide-y divide-slate-50 dark:divide-slate-800">
+                  {staseList.map(s => (
+                    <div key={s.slug} className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                      <span className={`material-symbols-outlined text-[20px] shrink-0 ${s.materi_exists ? 'text-emerald-500' : 'text-amber-400'}`} style={{ fontVariationSettings: "'FILL' 1" }}>
+                        {s.materi_exists ? 'folder' : 'folder_off'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">{s.display_name}</p>
+                          {s.is_builtin && <span className="text-[9px] font-bold px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-full border border-indigo-100">builtin</span>}
+                        </div>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          slug: <code className="font-mono text-violet-600">{s.slug}</code>
+                          {' · '}folder: <code className="font-mono text-slate-500">{s.dirname}/Materi/</code>
+                          {!s.materi_exists && <span className="ml-1 text-amber-500">⚠ folder tidak ada</span>}
+                        </p>
+                      </div>
+                      {!s.is_builtin && (
+                        <button onClick={() => handleDeleteStase(s.slug)}
+                          title="Hapus dari registry"
+                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all shrink-0">
+                          <span className="material-symbols-outlined text-[16px]">delete</span>
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 mb-4">
+                <span className="material-symbols-outlined text-[16px] text-violet-500">add_circle</span>
+                Tambah Stase Baru
+              </h3>
+              <div className="space-y-3 max-w-sm">
+                <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-1">Slug</label>
+                  <input value={newSlug} onChange={e => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                    placeholder="saraf"
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400 font-mono" />
+                  {newSlug && <p className="text-[10px] text-slate-400 mt-1">Folder: <code className="text-violet-600">{newSlug.charAt(0).toUpperCase() + newSlug.slice(1)}/Materi/</code></p>}
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-1">Nama Stase</label>
+                  <input value={newDisplayName} onChange={e => setNewDisplayName(e.target.value)}
+                    placeholder="Stase Neurologi"
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400" />
+                </div>
+                <button onClick={handleCreateStase} disabled={creatingStase || !newSlug || !newDisplayName}
+                  className="w-full py-2.5 bg-violet-600 text-white text-sm font-medium rounded-xl hover:bg-violet-700 transition-all disabled:opacity-60 flex items-center justify-center gap-1.5">
+                  <span className="material-symbols-outlined text-[16px]">{creatingStase ? 'sync' : 'add'}</span>
+                  {creatingStase ? 'Membuat...' : 'Buat Stase'}
+                </button>
+                {staseMsg && <p className="text-xs font-medium text-center" style={{ color: staseMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }}>{staseMsg}</p>}
+              </div>
+              <div className="mt-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-xl">
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  <strong className="text-slate-600 dark:text-slate-300">Konvensi folder:</strong> Slug <code className="text-violet-600">saraf</code> → folder{' '}
+                  <code className="text-violet-600">E:\Coas\Saraf\Materi\</code><br />
+                  File CSV katalog penyakit akan dibuat otomatis. Upload sumber materi via tab Source Manager.
+                </p>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── END ADMIN PANEL ─────────────────────────────────────────────────────────
+
   return (
     <div className="h-dvh md:h-screen w-full overflow-hidden flex bg-background">
       {/* ── SideNavBar — hidden on mobile, icon-only on tablet, full on desktop ── */}
@@ -2091,6 +2527,7 @@ export default function App() {
               { icon: 'book', label: 'Medical Library', id: 'library' as const },
               { icon: 'hub', label: 'Knowledge Graph', id: 'kg' as const },
               { icon: 'query_stats', label: 'Analytics', id: 'analytics' as const },
+              { icon: 'admin_panel_settings', label: 'Admin Panel', id: 'admin' as const },
             ] as const
           ).map((item) => (
             <button
@@ -2181,6 +2618,7 @@ export default function App() {
           </div>
         )}
 
+        {activeView === 'admin' && <AdminPanel />}
         {/* Chat Canvas */}
         {activeView === 'chat' && (
         <>

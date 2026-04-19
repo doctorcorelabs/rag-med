@@ -9,6 +9,7 @@ from typing import Iterable
 from .config import (
     DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT,
     MATERI_GLOB, MATERI_PAGE_GLOB, STASE_MATERI_ROOTS, EMBEDDING_MODEL,
+    load_stase_roots,
 )
 from .models import ChunkRecord, ImageRecord, SourcePage
 
@@ -20,39 +21,86 @@ TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|", re.MULTILINE)
 NUMBERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+", re.MULTILINE)
 DOSE_BLOCK_RE = re.compile(r"\d+\s*(?:mg|mcg|µg|unit|ml|g/dl|g/dL|mmol|mEq|IU|gram|tablet|kapsul|ampul|vial)", re.IGNORECASE)
 
-# Section rules for KG edge extraction
+# Section rules for KG edge extraction — EXTENDED for better coverage
 SECTION_CATEGORY_MAP = {
+    # Definisi
     "definisi": "Definisi",
     "pengertian": "Definisi",
+    "batasan": "Definisi",
+    "deskripsi": "Definisi",
+    # Etiologi
     "etiologi": "Etiologi",
     "faktor risiko": "Etiologi",
     "penyebab": "Etiologi",
+    "kausa": "Etiologi",
+    "predisposisi": "Etiologi",
+    "epidemiologi": "Etiologi",
+    "insidensi": "Etiologi",
+    "prevalensi": "Etiologi",
+    # Patogenesis
     "patogenesis": "Patogenesis",
     "patofisiologi": "Patogenesis",
     "mekanisme": "Patogenesis",
     "fisiologi": "Patogenesis",
+    "imunopatologi": "Patogenesis",
+    # Anamnesis
     "anamnesis": "Anamnesis",
     "anamnesa": "Anamnesis",
     "riwayat": "Anamnesis",
+    "keluhan utama": "Anamnesis",
+    # Manifestasi Klinis
     "manifestasi": "Manifestasi_Klinis",
     "gejala": "Manifestasi_Klinis",
     "klinis": "Manifestasi_Klinis",
     "keluhan": "Manifestasi_Klinis",
+    "gambaran klinis": "Manifestasi_Klinis",
+    "tanda klinis": "Manifestasi_Klinis",
+    "simptom": "Manifestasi_Klinis",
+    "sindrom": "Manifestasi_Klinis",
+    "presentasi": "Manifestasi_Klinis",
+    "gejala klinis": "Manifestasi_Klinis",
+    # Pemeriksaan Fisik
     "pemeriksaan fisik": "Pemeriksaan_Fisik",
+    "physical exam": "Pemeriksaan_Fisik",
+    # Diagnosis
     "diagnosis": "Diagnosis",
     "pemeriksaan": "Diagnosis",
     "penunjang": "Diagnosis",
     "laboratorium": "Diagnosis",
     "radiologi": "Diagnosis",
+    "kriteria": "Diagnosis",
+    "gold standard": "Diagnosis",
+    "baku emas": "Diagnosis",
+    "staging": "Diagnosis",
+    "klasifikasi": "Diagnosis",
+    "grading": "Diagnosis",
+    # Tatalaksana
     "tata laksana": "Tatalaksana",
+    "tatalaksana": "Tatalaksana",
     "terapi": "Tatalaksana",
     "pengobatan": "Tatalaksana",
-    "obat": "Tatalaksana",
+    "penatalaksanaan": "Tatalaksana",
     "farmakologi": "Tatalaksana",
+    "obat": "Tatalaksana",
     "dosis": "Tatalaksana",
     "regimen": "Tatalaksana",
+    "medikamentosa": "Tatalaksana",
+    "non-farmakologi": "Tatalaksana",
+    "nonfarmakologi": "Tatalaksana",
+    "intervensi": "Tatalaksana",
+    "protokol": "Tatalaksana",
+    "penanganan": "Tatalaksana",
+    "manajemen": "Tatalaksana",
+    # Komplikasi
     "komplikasi": "Komplikasi",
+    "penyulit": "Komplikasi",
+    # Prognosis
     "prognosis": "Prognosis",
+    "luaran": "Prognosis",
+    "mortalitas": "Prognosis",
+    "survival": "Prognosis",
+    "angka kematian": "Prognosis",
+    "pencegahan": "Prognosis",
 }
 
 
@@ -66,10 +114,10 @@ def _normalize_text(value: str) -> str:
 
 
 def discover_source_pages(workspace_root: Path) -> list[SourcePage]:
-    """Discover all markdown source pages across all configured stases."""
+    """Discover all markdown source pages across all configured stases (hardcoded + overrides)."""
     pages: list[SourcePage] = []
 
-    for stase_slug, materi_dir in STASE_MATERI_ROOTS:
+    for stase_slug, materi_dir in load_stase_roots():  # ← dynamic loader
         materi_root = workspace_root / materi_dir
         if not materi_root.is_dir():
             continue
@@ -86,7 +134,7 @@ def discover_source_pages(workspace_root: Path) -> list[SourcePage]:
                 )
             )
 
-    # Fallback: if STASE_MATERI_ROOTS is empty, use legacy glob
+    # Fallback: if load_stase_roots() is empty, use legacy glob
     if not pages:
         for md_path in workspace_root.glob(MATERI_GLOB):
             source_name = md_path.parents[2].name
@@ -285,9 +333,13 @@ def _derive_tags(heading: str, text: str) -> str:
 
 
 def _detect_section_category(heading: str) -> str | None:
-    """Heuristic detection of which clinical section a heading belongs to."""
+    """Heuristic detection of which clinical section a heading belongs to.
+    Sorts keywords by length descending so multi-word phrases match first.
+    """
     h_lower = heading.lower()
-    for keyword, category in SECTION_CATEGORY_MAP.items():
+    for keyword, category in sorted(
+        SECTION_CATEGORY_MAP.items(), key=lambda x: len(x[0]), reverse=True
+    ):
         if keyword in h_lower:
             return category
     return None
@@ -609,6 +661,84 @@ def build_index(
 
     return {
         "source_pages": len(source_pages),
+        "chunks": len(all_chunks),
+        "images": len(all_images),
+    }
+
+
+def build_index_for_source(
+    source_name: str,
+    stase_slug: str,
+    workspace_root: Path,
+    db_path: Path,
+    skip_vector: bool = True,
+) -> dict[str, int]:
+    """
+    Partial re-index: hapus chunks lama dari satu sumber, parse ulang, insert baru.
+    Jauh lebih cepat dari full rebuild untuk upload sumber tunggal.
+    """
+    # Temukan materi root untuk stase ini
+    materi_root: Path | None = None
+    for slug, materi_rel in load_stase_roots():
+        if slug == stase_slug:
+            materi_root = workspace_root / materi_rel
+            break
+    if materi_root is None:
+        raise ValueError(f"Stase slug '{stase_slug}' tidak ditemukan")
+
+    source_dir = materi_root / source_name
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Folder '{source_name}' tidak ada di {materi_root}")
+
+    # Kumpulkan semua page dari sumber ini
+    pages: list[SourcePage] = []
+    for md_path in source_dir.glob("pages/page-*/markdown.md"):
+        page_dir = md_path.parent.name
+        page_no = int(page_dir.replace("page-", "")) if page_dir.startswith("page-") else -1
+        pages.append(
+            SourcePage(
+                source_name=source_name,
+                page_no=page_no,
+                markdown_path=md_path,
+                stase_slug=stase_slug,
+            )
+        )
+    pages.sort(key=lambda p: p.page_no)
+
+    all_chunks: list[ChunkRecord] = []
+    all_images: list[ImageRecord] = []
+    for page in pages:
+        chunks, images = parse_page(page)
+        all_chunks.extend(chunks)
+        all_images.extend(images)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Hapus FTS entries lama untuk sumber ini
+        old_ids = [
+            r[0] for r in conn.execute(
+                "SELECT id FROM chunks WHERE source_name = ?", (source_name,)
+            )
+        ]
+        if old_ids:
+            placeholders = ",".join("?" * len(old_ids))
+            conn.execute(
+                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", old_ids
+            )
+        conn.execute("DELETE FROM chunks WHERE source_name = ?", (source_name,))
+        conn.execute("DELETE FROM images WHERE source_name = ?", (source_name,))
+        conn.execute("DELETE FROM graph_edges WHERE source_name = ?", (source_name,))
+
+        # Insert baru
+        _insert_records(conn, all_chunks, all_images)
+        _insert_graph_edges(conn, all_chunks)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "source_name": source_name,
+        "pages": len(pages),
         "chunks": len(all_chunks),
         "images": len(all_images),
     }

@@ -204,11 +204,85 @@ DISEASE_KEYWORDS: list[str] = [
     # Penyakit Dalam (Cardio, Gastro, Endo, dll)
     "diabetes", "hipertensi", "gagal jantung", "chf", "acs", "stemi", "nstemi",
     "anemia", "hiv", "aids", "meningitis", "hepatitis",
-    "sirosis", "gerd", "dispepsia", "gagal ginjal", "ckd", "aki", 
+    "sirosis", "gerd", "dispepsia", "gagal ginjal", "ckd", "aki",
     "lupus", "rheumatoid", "stroke", "infark miokard", "aritmia",
     "demam tifoid", "malaria", "dengue", "dbd", "leptospirosis",
     "sindrom koroner akut", "ska", "penyakit jantung koroner", "pjk",
 ]
+
+
+# ─────────────────────────────────────────────
+# Enumerative / List Intent Detection
+# ─────────────────────────────────────────────
+LIST_INTENT_KEYWORDS: list[str] = [
+    "daftar penyakit", "list penyakit", "semua penyakit",
+    "penyakit apa saja", "apa saja penyakit", "sebutkan penyakit",
+    "penyakit yang ada", "semua topik", "topik apa saja",
+    "daftar topik", "apa yang tersedia", "berikan daftar",
+    "tampilkan semua", "list semua", "semua materi",
+    "materi apa saja", "semua sumber", "list sumber",
+]
+
+
+def detect_list_intent(query: str) -> bool:
+    """Deteksi apakah query ingin enumerasi daftar penyakit/topik."""
+    q = query.lower()
+    return any(kw in q for kw in LIST_INTENT_KEYWORDS)
+
+
+def get_topics_from_db(
+    db_path: "Path | None",
+    stase_slug: str | None = None,
+) -> dict:
+    """
+    Enumerasi semua heading/topik dari DB, dikelompokkan per sumber.
+    Tidak menggunakan BM25/vector — langsung baca metadata chunks.
+    """
+    database = db_path or DEFAULT_DB_PATH
+    conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        params: list = []
+        where = "WHERE heading NOT IN ('General', 'Image from page folder')"
+        if stase_slug:
+            where += " AND stase_slug = ?"
+            params.append(stase_slug)
+
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT source_name, heading, section_category, stase_slug
+            FROM chunks
+            {where}
+            ORDER BY source_name, heading
+            """,
+            params,
+        ).fetchall()
+
+        grouped: dict[str, dict] = {}
+        for r in rows:
+            src = r["source_name"]
+            if src not in grouped:
+                grouped[src] = {
+                    "source_name": src,
+                    "stase_slug": r["stase_slug"],
+                    "topics": [],
+                }
+            grouped[src]["topics"].append({
+                "heading": r["heading"],
+                "section_category": r["section_category"],
+            })
+
+        sources = list(grouped.values())
+        for s in sources:
+            s["topic_count"] = len(s["topics"])
+
+        return {
+            "sources": sources,
+            "total_topics": sum(s["topic_count"] for s in sources),
+            "source_count": len(sources),
+        }
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────────────────────
@@ -279,7 +353,12 @@ def _filter_by_disease_relevance(
     results: list[dict[str, Any]],
     disease_name: str | None,
 ) -> list[dict[str, Any]]:
-    """Filter out chunks that don't belong to the target disease."""
+    """
+    Softer disease relevance filter (v2).
+    Hanya buang chunk jika heading-nya EKSPLISIT menyebut penyakit LAIN.
+    Chunk dengan heading generic (Patofisiologi, Tatalaksana, dll) TETAP dipertahankan
+    agar tidak over-filter konten yang valid.
+    """
     if not disease_name:
         return results
 
@@ -288,36 +367,22 @@ def _filter_by_disease_relevance(
         for syn in MEDICAL_SYNONYMS[disease_name.lower()]:
             acceptable.add(syn.lower())
 
+    # Hanya filter penyakit lain yang panjang nama-nya (>3 char) untuk menghindari false positive
     other_diseases = {
         kw.lower() for kw in DISEASE_KEYWORDS
-        if kw.lower() not in acceptable
+        if kw.lower() not in acceptable and len(kw) > 3
     }
 
     filtered = []
     for item in results:
         heading_lower = item.get("heading", "").lower()
-        content_lower = item.get("content", "").lower()[:400]
-        combined = f"{heading_lower} {content_lower}"
-
-        mentions_target = any(term in combined for term in acceptable)
-        heading_mentions_other = any(disease in heading_lower for disease in other_diseases if len(disease) > 2)
-        heading_is_generic = heading_lower.rstrip(":").strip() in {
-            "patofisiologi", "patogenesis", "definisi", "etiologi",
-            "tatalaksana", "tata laksana", "manifestasi klinis",
-            "diagnosis", "komplikasi", "prognosis", "general",
-            "pemeriksaan fisik", "pemeriksaan penunjang",
-            "anamnesis", "faktor risiko",
-        }
-
-        if mentions_target:
-            filtered.append(item)
-        elif heading_mentions_other:
+        # Hanya skip jika heading EKSPLISIT menyebut penyakit lain
+        if any(disease in heading_lower for disease in other_diseases):
             continue
-        elif heading_is_generic and not mentions_target:
-            continue
-        else:
-            filtered.append(item)
-    return filtered
+        filtered.append(item)
+
+    # Safety fallback: jika filter terlalu agresif, kembalikan semua
+    return filtered if filtered else results
 
 
 def search_chunks(
@@ -340,6 +405,9 @@ def search_chunks(
     effective_top_k = top_k
     if is_detail:
         effective_top_k = max(top_k * 2, 16)
+    elif not detected_disease and not intent:
+        # Broad/generic query: pakai minimum 12 untuk coverage lebih baik
+        effective_top_k = max(top_k, 12)
 
     queries_to_run = [enriched_query]
     if is_detail or (detected_disease and not intent):
