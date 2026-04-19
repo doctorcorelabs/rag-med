@@ -139,6 +139,52 @@ function imageItemHasStableRef(img: ImageItem): boolean {
 
 type ActiveView = 'chat' | 'library' | 'kg' | 'analytics';
 
+// ─── RESPONSIVE HOOKS ───────────────────────────────────────────────────────
+function useScreenSize() {
+  const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const handler = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+  return { isMobile: size.w < 768, isTablet: size.w >= 768 && size.w < 1024, isDesktop: size.w >= 1024, ...size };
+}
+
+// ─── MOBILE BOTTOM NAV ──────────────────────────────────────────────────────
+const NAV_ITEMS: { icon: string; label: string; id: ActiveView }[] = [
+  { icon: 'chat_bubble', label: 'Chat', id: 'chat' },
+  { icon: 'book', label: 'Library', id: 'library' },
+  { icon: 'hub', label: 'KG', id: 'kg' },
+  { icon: 'query_stats', label: 'Analytics', id: 'analytics' },
+];
+
+function MobileBottomNav({ activeView, onChangeView }: { activeView: ActiveView; onChangeView: (v: ActiveView) => void }) {
+  return (
+    <nav className="mobile-bottom-nav fixed bottom-0 left-0 right-0 z-40 flex items-stretch md:hidden">
+      {NAV_ITEMS.map((item) => {
+        const active = activeView === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChangeView(item.id)}
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+              active ? 'text-indigo-600' : 'text-slate-400'
+            }`}
+          >
+            <span
+              className={`material-symbols-outlined text-[22px] transition-all ${active ? 'scale-110' : ''}`}
+              style={active ? { fontVariationSettings: "'FILL' 1" } : undefined}
+            >{item.icon}</span>
+            <span className={`text-[10px] font-medium ${active ? 'font-bold' : ''}`}>{item.label}</span>
+            {active && <span className="absolute bottom-1 w-5 h-0.5 rounded-full bg-indigo-600" />}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
 // Section icon mapping
 const SECTION_ICONS: Record<string, string> = {
   'Definisi': 'info',
@@ -381,11 +427,13 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
   const [editType, setEditType] = useState<NodeType>('concept');
   const [showVisuals, setShowVisuals] = useState(false);
   const [graphKey, setGraphKey] = useState(0);
+  const [kgListOpen, setKgListOpen] = useState(false); // mobile: togglable list
   const containerRef = useRef<HTMLDivElement>(null);
   const graphPanelRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
   const graphRef = useRef<any>(null);
+  const { isMobile: kgMobile } = useScreenSize();
 
   const toggleGraphFullscreen = useCallback(async () => {
     const el = graphPanelRef.current;
@@ -620,10 +668,29 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
   }, [hasGraph, isGraphFullscreen]);
 
   return (
-    <div className="flex-1 flex min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+      {/* ── Mobile: toggle button for disease list ── */}
+      {kgMobile && (
+        <button
+          type="button"
+          onClick={() => setKgListOpen(!kgListOpen)}
+          className="flex items-center gap-2 px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 shrink-0"
+        >
+          <span className="material-symbols-outlined text-[18px] text-slate-500">{kgListOpen ? 'expand_less' : 'format_list_bulleted'}</span>
+          <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+            {selectedId ? diseases.find(d => d.id === selectedId)?.name || 'Pilih Penyakit' : 'Pilih Penyakit'}
+          </span>
+          <span className="material-symbols-outlined text-[16px] text-slate-400 ml-auto">{kgListOpen ? 'close' : 'chevron_right'}</span>
+        </button>
+      )}
+
       {/* ── Left: Disease List ── */}
-      <div className="w-72 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/60">
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800">
+      <div className={`${
+        kgMobile
+          ? (kgListOpen ? 'flex flex-col max-h-[50vh] border-b border-slate-200 dark:border-slate-700' : 'hidden')
+          : 'w-56 lg:w-72 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800'
+      } bg-slate-50/60 dark:bg-slate-900/60`}>
+        <div className={`p-3 md:p-4 border-b border-slate-100 dark:border-slate-800 ${kgMobile ? '' : ''}`}>
           <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-1.5">Stase</p>
           <select
             value={staseSlug}
@@ -877,7 +944,7 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
 
                 {/* View mode popup */}
                 {!editMode && activeNode && (
-                  <div className="absolute bottom-4 right-4 max-w-xs bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-4 z-10">
+                  <div className="absolute bottom-2 left-2 right-2 md:left-auto md:bottom-4 md:right-4 max-w-full md:max-w-xs bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-3 md:p-4 z-10">
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <span className={`text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded border ${
                         activeNode.type === 'root' ? 'bg-indigo-600 text-white border-indigo-700' :
@@ -889,15 +956,22 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
                         <span className="material-symbols-outlined text-[16px]">close</span>
                       </button>
                     </div>
-                    <p className="font-headline font-bold text-slate-800 dark:text-slate-100 mb-2 leading-snug">{activeNode.label}</p>
-                    <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{activeNode.summary}</p>
+                    <p className="font-headline font-bold text-sm md:text-base text-slate-800 dark:text-slate-100 mb-1.5 md:mb-2 leading-snug">{activeNode.label}</p>
+                    <p className="text-xs md:text-sm text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-4 md:line-clamp-none">{activeNode.summary}</p>
                   </div>
                 )}
               </div>
 
-              {/* Edit Panel (slide in from right) */}
+              {/* Edit Panel — bottom sheet on mobile, side panel on desktop */}
               {editMode && activeNode && (
-                <div className="w-72 shrink-0 border-l border-rose-100 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col shadow-xl z-20 overflow-y-auto">
+                <>
+                  {/* Mobile overlay */}
+                  {kgMobile && <div className="fixed inset-0 bg-black/40 z-30" onClick={() => setActiveNode(null)} />}
+                  <div className={`${
+                    kgMobile
+                      ? 'fixed bottom-0 left-0 right-0 z-40 rounded-t-2xl max-h-[80vh] shadow-2xl'
+                      : 'w-72 shrink-0 border-l border-rose-100 dark:border-slate-700 z-20'
+                  } bg-white dark:bg-slate-900 flex flex-col overflow-y-auto`}>
                   {/* Panel header */}
                   <div className="px-4 py-3 border-b border-rose-100 dark:border-slate-800 flex items-center justify-between shrink-0 bg-rose-50 dark:bg-rose-900/20">
                     <div className="flex items-center gap-2">
@@ -976,6 +1050,7 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
                     </div>
                   </div>
                 </div>
+                </>
               )}
             </div>
 
@@ -1016,6 +1091,8 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [visualBusy, setVisualBusy] = useState(false);
   const [visualSuggestions, setVisualSuggestions] = useState<ImageItem[]>([]);
   const [visualSelected, setVisualSelected] = useState<ImageItem[]>([]);
+  const [mobileDetailView, setMobileDetailView] = useState(false);
+  const { isMobile: libMobile } = useScreenSize();
 
   useEffect(() => {
     axios
@@ -1051,6 +1128,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         const r = await axios.get<LibraryDiseaseDetail>(`${API_URL}/library/stases/${staseSlug}/diseases/${id}`);
         setDetail(r.data);
         setEditMarkdown(r.data.markdown || '');
+        setMobileDetailView(true); // on mobile, switch to detail view
       } catch {
         setDetail(null);
         setErr('Gagal memuat detail penyakit.');
@@ -1282,9 +1360,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   return (
     <div className="flex-1 flex flex-col min-h-0 h-full bg-background">
       <div className="flex-1 flex flex-col lg:flex-row min-h-0 gap-0">
-        {/* List column */}
-        <aside className="w-full lg:w-[min(420px,40vw)] shrink-0 border-r border-slate-200/60 dark:border-slate-800 flex flex-col bg-slate-50/40 dark:bg-slate-950/30">
-          <div className="p-4 border-b border-slate-200/50 space-y-3">
+        {/* List column — hidden on mobile when detail is open */}
+        <aside className={`${
+          libMobile && mobileDetailView ? 'hidden'
+          : 'flex flex-col'
+        } w-full md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)] shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30`}>
+          <div className="p-3 md:p-4 border-b border-slate-200/50 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100">Medical Library</h2>
               <button
@@ -1394,12 +1475,25 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
           </div>
         </aside>
 
-        {/* Detail column */}
-        <section className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto bg-white/40 dark:bg-slate-900/20">
+        {/* Detail column — hidden on mobile unless detail selected */}
+        <section className={`${
+          libMobile && !mobileDetailView ? 'hidden'
+          : 'flex flex-col'
+        } flex-1 min-w-0 min-h-0 overflow-y-auto bg-white/40 dark:bg-slate-900/20`}>
           {!selectedId && (
-            <div className="m-auto text-center max-w-sm p-8 text-slate-400">
-              <span className="material-symbols-outlined text-5xl mb-3 opacity-40">menu_book</span>
+            <div className="m-auto text-center max-w-sm p-6 md:p-8 text-slate-400">
+              <span className="material-symbols-outlined text-4xl md:text-5xl mb-3 opacity-40">menu_book</span>
               <p className="text-sm">Pilih penyakit di daftar untuk melihat atau membuat penjelasan.</p>
+              {libMobile && (
+                <button
+                  type="button"
+                  onClick={() => setMobileDetailView(false)}
+                  className="mt-4 flex items-center gap-1.5 mx-auto px-4 py-2 text-sm text-indigo-600 bg-indigo-50 rounded-full font-medium"
+                >
+                  <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                  Kembali ke daftar
+                </button>
+              )}
             </div>
           )}
           {selectedId && loadingDetail && (
@@ -1409,8 +1503,19 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
             </div>
           )}
           {selectedId && !loadingDetail && detail && (
-            <div className="p-4 md:p-8 max-w-4xl mx-auto w-full space-y-6 pb-24">
-              <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="p-3 md:p-4 lg:p-8 max-w-4xl mx-auto w-full space-y-4 md:space-y-6 pb-24">
+              {/* Mobile back button */}
+              {libMobile && (
+                <button
+                  type="button"
+                  onClick={() => { setMobileDetailView(false); setSelectedId(null); setDetail(null); }}
+                  className="flex items-center gap-1.5 text-sm text-indigo-600 font-medium mb-2"
+                >
+                  <span className="material-symbols-outlined text-[18px]">arrow_back</span>
+                  Daftar penyakit
+                </button>
+              )}
+              <div className="flex flex-wrap items-start justify-between gap-3 md:gap-4">
                 <div>
                   <p className="text-xs font-label text-slate-500 uppercase tracking-widest">Penyakit terpilih</p>
                   <h2 className="text-2xl font-headline font-bold text-slate-800 dark:text-slate-100">
@@ -1423,7 +1528,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                     </span>
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="grid grid-cols-2 md:flex md:flex-wrap gap-2">
                   <button
                     type="button"
                     disabled={busy || previewLoading}
@@ -1841,6 +1946,7 @@ export default function App() {
   const [kgInitialDisease, setKgInitialDisease] = useState<string | null>(null); // auto-select in KG panel
   const [activeView, setActiveView] = useState<ActiveView>('chat');
   const [activeStase, setActiveStase] = useState<string>('ipd');
+  const { isMobile, isTablet } = useScreenSize();
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -1952,14 +2058,14 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen w-full overflow-hidden flex bg-background">
-      {/* ── SideNavBar ── */}
-      <nav className={`fixed left-0 top-0 h-full z-40 flex-col p-4 bg-slate-50/40 dark:bg-slate-950/40 backdrop-blur-2xl transition-all duration-300 ease-in-out ${isSidebarMinimized ? 'w-20' : 'w-72'} rounded-r-3xl tonal-layering no-border shadow-[40px_0_60px_-10px_rgba(0,0,0,0.04)] font-[Inter] text-sm hidden md:flex overflow-x-hidden`}>
+    <div className="h-dvh md:h-screen w-full overflow-hidden flex bg-background">
+      {/* ── SideNavBar — hidden on mobile, icon-only on tablet, full on desktop ── */}
+      <nav className={`fixed left-0 top-0 h-full z-40 flex-col p-4 bg-slate-50/40 dark:bg-slate-950/40 backdrop-blur-2xl transition-all duration-300 ease-in-out ${isSidebarMinimized || isTablet ? 'w-20' : 'w-72'} rounded-r-3xl tonal-layering no-border shadow-[40px_0_60px_-10px_rgba(0,0,0,0.04)] font-[Inter] text-sm hidden md:flex overflow-x-hidden`}>
         <div className="flex items-center gap-3 mb-10 px-2 mt-4">
           <div className="h-10 w-10 min-w-[2.5rem] rounded-full bg-primary-container flex items-center justify-center shrink-0">
             <span className="material-symbols-outlined text-secondary" style={{ fontVariationSettings: "'FILL' 1" }}>medical_services</span>
           </div>
-          <div className={`transition-opacity duration-300 whitespace-nowrap ${isSidebarMinimized ? 'opacity-0 pointer-events-none w-0' : 'opacity-100'}`}>
+          <div className={`transition-opacity duration-300 whitespace-nowrap ${isSidebarMinimized || isTablet ? 'opacity-0 pointer-events-none w-0' : 'opacity-100'}`}>
             <h2 className="text-lg font-black text-slate-800 dark:text-slate-200">Clinical Assistant</h2>
             <p className="text-xs text-on-surface-variant font-label">AI-Powered Insights</p>
           </div>
@@ -1970,10 +2076,10 @@ export default function App() {
             if (activeView === 'chat') clearChat();
             else setActiveView('chat');
           }}
-          className={`gradient-btn w-full rounded-full py-3 px-3 text-white font-medium mb-8 flex items-center justify-center gap-2 hover:opacity-90 transition-all ${isSidebarMinimized ? 'px-0' : ''}`}
+          className={`gradient-btn w-full rounded-full py-3 px-3 text-white font-medium mb-8 flex items-center justify-center gap-2 hover:opacity-90 transition-all ${isSidebarMinimized || isTablet ? 'px-0' : ''}`}
         >
           <span className="material-symbols-outlined text-[20px] shrink-0">add</span>
-          <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 hidden' : 'opacity-100'}`}>
+          <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized || isTablet ? 'opacity-0 hidden' : 'opacity-100'}`}>
             {activeView === 'chat' ? 'New Consultation' : 'Kembali ke Chat'}
           </span>
         </button>
@@ -1998,7 +2104,7 @@ export default function App() {
               }`}
             >
               <span className="material-symbols-outlined shrink-0 text-center w-6">{item.icon}</span>
-              <span className={`font-medium whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>
+              <span className={`font-medium whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized || isTablet ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>
                 {item.label}
               </span>
             </button>
@@ -2012,24 +2118,31 @@ export default function App() {
           ].map((item) => (
             <a key={item.label} className="flex items-center gap-3 px-3 py-2 text-slate-600 dark:text-slate-400 hover:text-indigo-500 rounded-xl transition-all flex-row cursor-pointer">
               <span className="material-symbols-outlined text-[20px] shrink-0 text-center w-6">{item.icon}</span>
-              <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>{item.label}</span>
+              <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized || isTablet ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>{item.label}</span>
             </a>
           ))}
         </div>
       </nav>
 
+      {/* ── Mobile Bottom Nav ── */}
+      {isMobile && <MobileBottomNav activeView={activeView} onChangeView={setActiveView} />}
+
       {/* ── Main Content ── */}
-      <main className={`flex-1 flex flex-col h-full min-h-0 relative transition-all duration-300 ml-0 ${isSidebarMinimized ? 'md:ml-20' : 'md:ml-72'}`}>
+      <main className={`flex-1 flex flex-col h-full min-h-0 relative transition-all duration-300 ml-0 ${isTablet ? 'md:ml-20' : ''} ${!isTablet ? (isSidebarMinimized ? 'md:ml-20' : 'md:ml-72') : ''}`}>
         {/* Header */}
-        <header className="flex justify-between items-center px-4 md:px-8 h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30 shrink-0">
-          <div className="flex items-center gap-4">
+        <header className="flex justify-between items-center px-3 md:px-8 h-14 md:h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30 shrink-0">
+          <div className="flex items-center gap-2 md:gap-4">
+            {/* Mobile: app icon; Tablet+Desktop: sidebar toggle */}
+            <div className="md:hidden w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm">
+              <span className="material-symbols-outlined text-white text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>medical_services</span>
+            </div>
             <button onClick={() => setIsSidebarMinimized(!isSidebarMinimized)} className="hidden md:flex p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
-              <span className="material-symbols-outlined">{isSidebarMinimized ? 'menu' : 'menu_open'}</span>
+              <span className="material-symbols-outlined">{isSidebarMinimized || isTablet ? 'menu' : 'menu_open'}</span>
             </button>
-            <h1 className="text-xl md:text-2xl font-headline font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
+            <h1 className="text-base md:text-xl lg:text-2xl font-headline font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
               Medical RAG
               {activeView === 'library' && (
-                <span className="block text-xs font-normal text-slate-500 mt-0.5">Medical Library</span>
+                <span className="hidden md:block text-xs font-normal text-slate-500 mt-0.5">Medical Library</span>
               )}
             </h1>
           </div>
@@ -2071,15 +2184,15 @@ export default function App() {
         {/* Chat Canvas */}
         {activeView === 'chat' && (
         <>
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-8 pb-40 flex flex-col gap-8 min-h-0">
+        <div className="flex-1 overflow-y-auto px-3 md:px-12 lg:px-24 py-4 md:py-8 pb-48 md:pb-40 flex flex-col gap-4 md:gap-8 min-h-0">
           {messages.length === 0 && (
-            <div className="m-auto text-center max-w-md pt-20 flex flex-col items-center opacity-70">
-              <span className="material-symbols-outlined text-6xl text-secondary mb-4 opacity-50" style={{ fontVariationSettings: "'FILL' 1" }}>biotech</span>
-              <h2 className="text-2xl font-headline font-bold text-slate-700">Mulai Konsultasi RAG</h2>
+            <div className="m-auto text-center max-w-md pt-10 md:pt-20 flex flex-col items-center opacity-70 px-4">
+              <span className="material-symbols-outlined text-5xl md:text-6xl text-secondary mb-3 md:mb-4 opacity-50" style={{ fontVariationSettings: "'FILL' 1" }}>biotech</span>
+              <h2 className="text-xl md:text-2xl font-headline font-bold text-slate-700">Mulai Konsultasi RAG</h2>
               <p className="text-sm mt-2 text-slate-500 leading-relaxed font-body">
                 Tanyakan kondisi klinis yang spesifik. Basis pengetahuan ini bersumber dari panduan medis terkini dan literatur terverifikasi.
               </p>
-              <div className="mt-6 grid grid-cols-2 gap-2 w-full">
+              <div className="mt-4 md:mt-6 grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
                 {['Diabetes Mellitus Tipe 2', 'Hipertensi', 'Pneumonia', 'Gagal Jantung'].map((suggestion) => (
                   <button
                     key={suggestion}
@@ -2094,7 +2207,7 @@ export default function App() {
           )}
 
           {messages.map((msg, idx) => (
-            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} gap-2 w-full ${msg.role === 'user' ? 'max-w-3xl ml-auto' : 'max-w-4xl mr-auto mt-6'}`}>
+            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} gap-1.5 md:gap-2 w-full ${msg.role === 'user' ? 'max-w-[90%] md:max-w-3xl ml-auto' : 'max-w-full md:max-w-4xl mr-auto mt-3 md:mt-6'} view-fade-in`}>
               {/* Avatar & Name */}
               <div className="flex items-center gap-2 mb-1 px-2">
                 {msg.role === 'user' ? (
@@ -2117,11 +2230,11 @@ export default function App() {
               {/* Message Bubble */}
               <div className={`${
                 msg.role === 'user'
-                  ? 'bg-surface-container-lowest glass-panel glass-border p-5 rounded-3xl rounded-tr-sm ambient-shadow text-on-surface max-w-full'
-                  : 'bg-surface-container-low/50 backdrop-blur-xl border border-white/40 p-6 md:p-8 rounded-[2.5rem] rounded-tl-sm shadow-[0_8px_32px_-12px_rgba(0,0,0,0.05)] w-full'
+                  ? 'bg-surface-container-lowest glass-panel glass-border p-3 md:p-5 rounded-2xl md:rounded-3xl rounded-tr-sm ambient-shadow text-on-surface max-w-full'
+                  : 'bg-surface-container-low/50 backdrop-blur-xl border border-white/40 p-3 md:p-6 lg:p-8 rounded-2xl md:rounded-[2.5rem] rounded-tl-sm shadow-[0_8px_32px_-12px_rgba(0,0,0,0.05)] w-full'
               }`}>
                 {msg.role === 'user' ? (
-                  <p className="font-body text-base leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                  <p className="font-body text-sm md:text-base leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                 ) : msg.error ? (
                   <div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 p-4 rounded-3xl">
                     <p className="text-red-600 dark:text-red-400 text-sm font-medium flex items-center gap-2">
@@ -2131,12 +2244,12 @@ export default function App() {
                   </div>
                 ) : msg.data ? (
                   <div className="prose prose-slate max-w-none text-on-surface font-body">
-                    <div className="bg-white/80 dark:bg-slate-900/80 rounded-[2.5rem] p-6 md:p-10 glass-border ambient-shadow space-y-10">
+                    <div className="bg-white/80 dark:bg-slate-900/80 rounded-2xl md:rounded-[2.5rem] p-4 md:p-6 lg:p-10 glass-border ambient-shadow space-y-6 md:space-y-10">
                       {/* Disease Title */}
                       {msg.data.draft_answer.disease && (
                         <div className="border-b border-slate-100 dark:border-slate-800 pb-6">
                           <p className="text-sm font-label text-slate-500 uppercase tracking-widest mb-1">Diagnosis Analysis</p>
-                          <h2 className="text-2xl md:text-3xl font-headline font-black text-slate-800 dark:text-slate-100">
+                          <h2 className="text-xl md:text-2xl lg:text-3xl font-headline font-black text-slate-800 dark:text-slate-100">
                             {msg.data.draft_answer.disease}
                           </h2>
                           {/* Ide 11 indicator */}
@@ -2150,7 +2263,7 @@ export default function App() {
                       )}
 
                       {/* Ide 2: Rich Markdown Sections */}
-                      <div className="space-y-10">
+                      <div className="space-y-5 md:space-y-10">
                         {msg.data.draft_answer.sections.map((section, sIdx) => renderSection(section, sIdx))}
                       </div>
 
@@ -2182,7 +2295,7 @@ export default function App() {
                             <span className="material-symbols-outlined text-[18px]">imagesmode</span>
                             Referensi Visual
                           </h3>
-                          <div className="flex gap-4 overflow-x-auto pb-4 snap-x">
+                          <div className="flex gap-3 md:gap-4 overflow-x-auto pb-4 snap-x -mx-1 px-1">
                             {msg.data.images.map((img, iIdx) => (
                               <div
                                 key={iIdx}
@@ -2195,11 +2308,11 @@ export default function App() {
                                 <img
                                   src={resolveImageUrl(img.image_url)}
                                   alt={img.heading}
-                                  className="w-48 h-32 object-cover transition-transform duration-500 group-hover:scale-110"
+                                  className="w-36 h-24 md:w-48 md:h-32 object-cover transition-transform duration-500 group-hover:scale-110"
                                   onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = PLACEHOLDER_IMG; }}
                                 />
                                 <div className="p-3 bg-white/90 dark:bg-slate-900/90 backdrop-blur-sm w-full absolute bottom-0 z-20">
-                                  <p className="text-[11px] text-center font-medium truncate w-40 text-slate-700 dark:text-slate-300">{img.heading}</p>
+                                  <p className="text-[10px] md:text-[11px] text-center font-medium truncate w-32 md:w-40 text-slate-700 dark:text-slate-300">{img.heading}</p>
                                 </div>
                               </div>
                             ))}
@@ -2213,7 +2326,7 @@ export default function App() {
 
               {/* Bot Action Bar */}
               {msg.role === 'bot' && !msg.error && msg.data && (
-                <div className="flex items-center gap-2 mt-2 ml-4 flex-wrap">
+                <div className="flex items-center gap-1.5 md:gap-2 mt-1.5 md:mt-2 ml-2 md:ml-4 flex-wrap">
                   <button aria-label="Copy" className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
                     <span className="material-symbols-outlined text-[18px]">content_copy</span>
                   </button>
@@ -2256,7 +2369,7 @@ export default function App() {
         </div>
 
         {/* Floating Input Area */}
-        <div className="absolute bottom-0 left-0 w-full p-4 md:p-8 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20">
+        <div className={`absolute left-0 w-full p-3 md:p-6 lg:p-8 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20 ${isMobile ? 'bottom-[var(--bottom-nav-h)]' : 'bottom-0'}`}>
           <div className="w-full max-w-4xl pointer-events-auto">
             {/* Stase selector */}
             <div className="flex items-center gap-2 mb-2 px-1">
@@ -2280,8 +2393,8 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <div className={`bg-surface-container-lowest/80 backdrop-blur-2xl rounded-[2rem] glass-border p-2 flex items-end gap-2 ambient-shadow transition-all ${isLoading ? 'opacity-80' : 'shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container'}`}>
-              <button disabled={isLoading} className="p-3 text-on-surface-variant hover:text-secondary hover:bg-secondary-container/50 rounded-full transition-colors shrink-0 mb-1">
+            <div className={`bg-surface-container-lowest/80 backdrop-blur-2xl rounded-2xl md:rounded-[2rem] glass-border p-1.5 md:p-2 flex items-end gap-1.5 md:gap-2 ambient-shadow transition-all ${isLoading ? 'opacity-80' : 'shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container'}`}>
+              <button disabled={isLoading} className="p-2 md:p-3 text-on-surface-variant hover:text-secondary hover:bg-secondary-container/50 rounded-full transition-colors shrink-0 mb-0.5 md:mb-1 hidden md:flex">
                 <span className="material-symbols-outlined">attach_file</span>
               </button>
               <div className="flex-1 relative">
@@ -2295,15 +2408,15 @@ export default function App() {
                     }
                   }}
                   disabled={isLoading}
-                  className="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-4 px-2 focus:ring-0 font-body text-base max-h-32 min-h-[56px] block outline-none disabled:opacity-70"
-                  placeholder={isLoading ? 'Sedang memproses...' : `Tanya seputar kondisi medis ${activeStase.toUpperCase()}, gejala, atau tindak lanjut...`}
+                  className="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-3 md:py-4 px-2 focus:ring-0 font-body text-sm md:text-base max-h-32 min-h-[44px] md:min-h-[56px] block outline-none disabled:opacity-70"
+                  placeholder={isLoading ? 'Memproses...' : (isMobile ? 'Tanya kondisi medis...' : `Tanya seputar kondisi medis ${activeStase.toUpperCase()}, gejala, atau tindak lanjut...`)}
                   rows={1}
                 />
               </div>
               <button
                 onClick={submitQuery}
                 disabled={isLoading || !query.trim()}
-                className="p-3 mb-1 bg-primary-container text-on-primary-container hover:bg-secondary hover:text-white rounded-full transition-all shrink-0 flex items-center justify-center group shadow-sm disabled:opacity-50 disabled:hover:bg-primary-container disabled:hover:text-on-primary-container"
+                className="p-2.5 md:p-3 mb-0.5 md:mb-1 bg-primary-container text-on-primary-container hover:bg-secondary hover:text-white rounded-full transition-all shrink-0 flex items-center justify-center group shadow-sm disabled:opacity-50 disabled:hover:bg-primary-container disabled:hover:text-on-primary-container"
               >
                 <span className="material-symbols-outlined group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform">send</span>
               </button>
@@ -2320,18 +2433,19 @@ export default function App() {
 
         {/* ── Evidence Modal ── */}
         {evidenceModal && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setEvidenceModal(null)}>
-            <div className="bg-surface-container-lowest glass-border glass-panel rounded-[2rem] max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
-              <div className="flex justify-between items-center p-6 border-b border-surface-variant/60">
-                <h2 className="text-lg font-headline font-bold text-secondary flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[20px]">library_books</span>
-                  Sitasi: {evidenceModal.citation}
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-0 md:p-4" onClick={() => setEvidenceModal(null)}>
+            <div className="bg-surface-container-lowest glass-border glass-panel rounded-t-2xl md:rounded-[2rem] max-w-2xl w-full max-h-[90vh] md:max-h-[85vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="bottom-sheet-handle md:hidden" />
+              <div className="flex justify-between items-center p-4 md:p-6 border-b border-surface-variant/60">
+                <h2 className="text-sm md:text-lg font-headline font-bold text-secondary flex items-center gap-2 min-w-0">
+                  <span className="material-symbols-outlined text-[18px] md:text-[20px] shrink-0">library_books</span>
+                  <span className="truncate">Sitasi: {evidenceModal.citation}</span>
                 </h2>
                 <button onClick={() => setEvidenceModal(null)} className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
                   <span className="material-symbols-outlined text-[20px]">close</span>
                 </button>
               </div>
-              <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              <div className="p-3 md:p-6 overflow-y-auto flex-1 space-y-3 md:space-y-4">
                 {evidenceModal.content.length > 0 ? (
                   evidenceModal.content.map((ev, idx) => (
                     <div key={idx} className="bg-surface-container-low/50 rounded-2xl p-5 border border-white/40">
@@ -2354,18 +2468,19 @@ export default function App() {
 
         {/* ── Image Modal ── */}
         {imageModal && (
-          <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4" onClick={() => setImageModal(null)}>
-            <div className="relative max-w-4xl w-full flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
-              <button onClick={() => setImageModal(null)} className="absolute -top-14 right-0 text-white hover:text-gray-300 flex items-center gap-2 font-medium bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full backdrop-blur-sm transition-colors">
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-end md:items-center justify-center z-50 p-0 md:p-4" onClick={() => setImageModal(null)}>
+            <div className="relative max-w-4xl w-full flex flex-col items-center bg-black/40 md:bg-transparent rounded-t-2xl md:rounded-none" onClick={(e) => e.stopPropagation()}>
+              <div className="bottom-sheet-handle md:hidden mt-2" />
+              <button onClick={() => setImageModal(null)} className="absolute top-3 right-3 md:-top-14 md:right-0 text-white hover:text-gray-300 flex items-center gap-2 font-medium bg-white/10 hover:bg-white/20 px-3 py-1.5 md:px-4 md:py-2 rounded-full backdrop-blur-sm transition-colors z-10">
                 <span className="material-symbols-outlined text-[18px]">close</span> Tutup
               </button>
               <img
                 src={resolveImageUrl(imageModal.image_url)}
                 alt={imageModal.heading}
-                className="w-full h-auto max-h-[75vh] object-contain rounded-2xl shadow-2xl"
+                className="w-full h-auto max-h-[60vh] md:max-h-[75vh] object-contain rounded-none md:rounded-2xl shadow-2xl"
                 onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = PLACEHOLDER_IMG; }}
               />
-              <div className="bg-surface-container-lowest glass-border glass-panel p-5 mt-4 rounded-2xl text-center shadow-lg w-full max-w-xl">
+              <div className="bg-surface-container-lowest glass-border glass-panel p-3 md:p-5 mt-2 md:mt-4 rounded-xl md:rounded-2xl text-center shadow-lg w-full max-w-xl mx-3 md:mx-auto">
                 <p className="font-headline text-lg font-bold text-secondary mb-1 truncate">{imageModal.heading}</p>
                 <p className="text-sm text-on-surface-variant font-label flex justify-center items-center gap-2">
                   <span className="material-symbols-outlined text-[16px]">menu_book</span>

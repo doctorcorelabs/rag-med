@@ -59,6 +59,21 @@
   --font-label: "Inter", sans-serif;
 }
 
+/* ─── Safe area CSS variables ─────────────────────────────────────────────── */
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --bottom-nav-h: 3.75rem; /* 60px — mobile bottom nav height */
+}
+
+/* ─── Core resets ─────────────────────────────────────────────────────────── */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 html, body, #root {
   min-height: 100%;
 }
@@ -71,14 +86,28 @@ body {
   overflow: hidden;
 }
 
+/* Mobile: use dynamic viewport height and allow scroll for virtual keyboard */
+@media (max-width: 767px) {
+  body {
+    overflow: auto;
+    overflow-x: hidden;
+  }
+  #root {
+    height: 100dvh;
+    overflow: hidden;
+  }
+}
+
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-headline);
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
+/* ─── Glass panels / effects ──────────────────────────────────────────────── */
 .glass-panel {
   background-color: rgba(255, 255, 255, 0.7);
   backdrop-filter: blur(24px) saturate(120%);
@@ -98,7 +127,7 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
-/* Rich Markdown Prose Styles (Ide 2) */
+/* ─── Rich Markdown Prose Styles (Ide 2) ──────────────────────────────────── */
 .prose p { margin-bottom: 0.85rem; line-height: 1.75; }
 .prose ul, .prose ol { padding-left: 1.5rem; margin-bottom: 1rem; }
 .prose li { margin-bottom: 0.4rem; line-height: 1.7; }
@@ -110,7 +139,13 @@ h1, h2, h3, h4, h5, h6 {
 .prose blockquote { border-left: 4px solid #a5b4fc; padding-left: 1rem; color: #64748b; font-style: italic; margin: 1rem 0; }
 .prose a { color: #4f46e5; text-decoration: underline; }
 
-/* Force Graph tooltip */
+/* Mobile: tighter prose */
+@media (max-width: 767px) {
+  .prose th, .prose td { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
+  .prose table { font-size: 0.8rem; }
+}
+
+/* ─── Force Graph tooltip ─────────────────────────────────────────────────── */
 .force-graph-tooltip {
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(12px);
@@ -122,4 +157,68 @@ h1, h2, h3, h4, h5, h6 {
   color: #1e293b;
   pointer-events: none;
   box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+}
+
+/* ─── Mobile Bottom Navigation ────────────────────────────────────────────── */
+.mobile-bottom-nav {
+  height: var(--bottom-nav-h);
+  padding-bottom: var(--safe-area-bottom);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-top: 1px solid rgba(169, 180, 185, 0.2);
+}
+
+/* ─── Bottom sheet shared base ────────────────────────────────────────────── */
+.bottom-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.bottom-sheet-content {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 51;
+  max-height: 90dvh;
+  border-radius: 1.5rem 1.5rem 0 0;
+  background: white;
+  box-shadow: 0 -10px 40px rgba(0,0,0,0.12);
+  animation: sheet-slide-up 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+@keyframes sheet-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.bottom-sheet-handle {
+  width: 2rem;
+  height: 0.25rem;
+  border-radius: 9999px;
+  background: #cbd5e1;
+  margin: 0.5rem auto 0;
+  flex-shrink: 0;
+}
+
+/* ─── Smooth transitions ──────────────────────────────────────────────────── */
+.view-fade-in {
+  animation: viewFadeIn 0.25s ease-out;
+}
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Scrollbar styling ───────────────────────────────────────────────────── */
+@media (min-width: 768px) {
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.3); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.5); }
 }
