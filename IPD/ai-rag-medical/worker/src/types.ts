@@ -171,6 +171,77 @@ export interface LibraryMergeMarkdownRequest {
   markdown_candidate: string;
 }
 
+export type ConversationNoteStatus = "draft" | "saved" | "ready_to_promote" | "promoted_to_library" | "archived" | "deleted";
+
+export interface ConversationNoteEvidenceSummary {
+  source_name: string;
+  page_no: number;
+  heading: string;
+  section_category?: string;
+  content_preview?: string;
+}
+
+export interface ConversationNoteRecord {
+  id: number;
+  stase_slug: string;
+  session_id: string;
+  query: string;
+  note_title: string;
+  note_summary?: string | null;
+  disease_name?: string | null;
+  note_markdown: string;
+  draft_answer: Record<string, unknown>;
+  evidence_summary: ConversationNoteEvidenceSummary[];
+  citation_quality?: Record<string, unknown>;
+  retrieval_metadata?: Record<string, unknown>;
+  note_status: ConversationNoteStatus;
+  library_catalog_id?: number | null;
+  match_candidates?: Array<{ catalog_id: number; name: string; stable_key?: string; score: number }>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ConversationNoteCreateRequest {
+  stase_slug?: string;
+  session_id: string;
+  query: string;
+  note_title?: string;
+  note_summary?: string | null;
+  disease_name?: string | null;
+  note_markdown?: string | null;
+  draft_answer: Record<string, unknown>;
+  evidence: Array<{
+    source_name: string;
+    page_no: number;
+    heading: string;
+    section_category?: string;
+    content?: string;
+  }>;
+  evidence_quality?: string | null;
+  retrieval_diagnostics?: Record<string, unknown> | null;
+}
+
+export interface ConversationNotePromoteRequest {
+  stase_slug?: string;
+  catalog_id?: number | null;
+}
+
+export interface ConversationNoteListItem {
+  id: number;
+  stase_slug: string;
+  session_id: string;
+  query: string;
+  note_title: string;
+  disease_name?: string | null;
+  note_status: ConversationNoteStatus;
+  library_catalog_id?: number | null;
+  note_summary?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  citation_precision?: number | null;
+  promoted?: boolean;
+}
+
 export interface SourcePageRecord {
   id?: number;
   stase_slug: string;

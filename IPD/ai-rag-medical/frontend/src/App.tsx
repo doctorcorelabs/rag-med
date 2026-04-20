@@ -137,6 +137,39 @@ type LibraryPreviewResponse = {
   persisted?: boolean;
 };
 
+type ConversationNoteStatus = 'draft' | 'saved' | 'ready_to_promote' | 'promoted_to_library' | 'archived' | 'deleted';
+
+type ConversationNoteListItem = {
+  id: number;
+  stase_slug: string;
+  session_id: string;
+  query: string;
+  note_title: string;
+  disease_name?: string | null;
+  note_status: ConversationNoteStatus;
+  library_catalog_id?: number | null;
+  note_summary?: string | null;
+  note_markdown?: string;
+  created_at?: string;
+  updated_at?: string;
+  citation_precision?: number | null;
+  promoted?: boolean;
+};
+
+type ConversationNoteDetail = ConversationNoteListItem & {
+  draft_answer: ApiResponse['draft_answer'];
+  evidence_summary: Array<{
+    source_name: string;
+    page_no: number;
+    heading: string;
+    section_category?: string;
+    content_preview?: string;
+  }>;
+  citation_quality?: Record<string, unknown>;
+  retrieval_metadata?: Record<string, unknown>;
+  match_candidates?: Array<{ catalog_id: number; name: string; stable_key?: string; score: number }>;
+};
+
 const API_URL = import.meta.env.VITE_API_URL || 'https://medrag-worker.daivanfebrijuansetiya.workers.dev';
 const DEFAULT_UPLOAD_MODE: 'legacy' | 'cloud' =
   import.meta.env.VITE_UPLOAD_MODE === 'legacy'
@@ -226,7 +259,40 @@ async function readZipMarkdownPages(file: File): Promise<CloudUploadPage[]> {
   return pages;
 }
 
-type ActiveView = 'chat' | 'library' | 'kg' | 'analytics' | 'admin';
+type ActiveView = 'chat' | 'notes' | 'library' | 'kg' | 'analytics' | 'admin';
+
+type NoteComposerState = {
+  open: boolean;
+  source: ApiResponse | null;
+  noteTitle: string;
+  noteSummary: string;
+  noteMarkdown: string;
+};
+
+function getOrCreateSessionId(): string {
+  try {
+    const key = 'medrag_session_id';
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function buildNoteMarkdownFromResponse(response: ApiResponse): string {
+  const title = response.draft_answer.disease || response.query || 'Catatan Klinis';
+  const sections = response.draft_answer.sections ?? [];
+  const parts = [`# ${title}`];
+  for (const section of sections) {
+    const content = (section.markdown ?? section.points?.map((p) => `- ${p}`).join('\n') ?? '').trim();
+    if (!content) continue;
+    parts.push(`\n## ${section.title}\n\n${content}`);
+  }
+  return parts.join('\n').trim() + '\n';
+}
 
 // ─── RESPONSIVE HOOKS ───────────────────────────────────────────────────────
 function useScreenSize() {
@@ -242,6 +308,7 @@ function useScreenSize() {
 // ─── MOBILE BOTTOM NAV ──────────────────────────────────────────────────────
 const NAV_ITEMS: { icon: string; label: string; id: ActiveView }[] = [
   { icon: 'chat_bubble', label: 'Chat', id: 'chat' },
+  { icon: 'note_stack', label: 'Notes', id: 'notes' },
   { icon: 'book', label: 'Library', id: 'library' },
   { icon: 'hub', label: 'KG', id: 'kg' },
   { icon: 'query_stats', label: 'Analytics', id: 'analytics' },
@@ -2093,9 +2160,339 @@ function CollapsibleSection({ title, children, icon }: { title: string; children
   );
 }
 
+// ─── CONVERSATION NOTES PANEL ───────────────────────────────────────────────
+function ConversationNotesPanel({
+  components,
+  staseSlug,
+  sessionId,
+  onOpenLibrary,
+}: {
+  components: typeof mdComponents;
+  staseSlug: string;
+  sessionId: string;
+  onOpenLibrary: () => void;
+}) {
+  const [notes, setNotes] = useState<ConversationNoteListItem[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<ConversationNoteDetail | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | ConversationNoteStatus>('all');
+  const [err, setErr] = useState<string | null>(null);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  const refreshNotes = useCallback(async () => {
+    setLoadingList(true);
+    setErr(null);
+    try {
+      const r = await axios.get<{ ok: boolean; notes: ConversationNoteListItem[] }>(`${API_URL}/conversation_notes`, {
+        params: { session_id: sessionId, stase_slug: staseSlug, limit: 100 },
+      });
+      const rows = r.data.notes || [];
+      setNotes(rows);
+      if (!selectedId && rows.length > 0) {
+        setSelectedId(rows[0].id);
+      }
+    } catch {
+      setErr('Gagal memuat catatan. Pastikan worker dan Supabase aktif.');
+    } finally {
+      setLoadingList(false);
+    }
+  }, [sessionId, staseSlug, selectedId]);
+
+  useEffect(() => {
+    void refreshNotes();
+  }, [refreshNotes]);
+
+  const loadDetail = useCallback(async (noteId: number) => {
+    setLoadingDetail(true);
+    setErr(null);
+    try {
+      const r = await axios.get<{ ok: boolean; note: ConversationNoteDetail }>(`${API_URL}/conversation_notes/${noteId}`);
+      setDetail(r.data.note);
+      setSelectedId(noteId);
+    } catch {
+      setErr('Gagal memuat detail catatan.');
+    } finally {
+      setLoadingDetail(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedId) {
+      void loadDetail(selectedId);
+    } else if (notes.length > 0) {
+      void loadDetail(notes[0].id);
+    } else {
+      setDetail(null);
+    }
+  }, [selectedId, notes, loadDetail]);
+
+  const filteredNotes = useMemo(() => {
+    return notes.filter((note) => {
+      if (statusFilter !== 'all' && note.note_status !== statusFilter) return false;
+      if (!search.trim()) return true;
+      const q = search.toLowerCase().trim();
+      return (
+        note.note_title.toLowerCase().includes(q) ||
+        note.query.toLowerCase().includes(q) ||
+        String(note.disease_name ?? '').toLowerCase().includes(q)
+      );
+    });
+  }, [notes, search, statusFilter]);
+
+  const currentDetail = detail ?? (filteredNotes.length > 0 ? { ...filteredNotes[0], draft_answer: { disease: filteredNotes[0].disease_name ?? filteredNotes[0].note_title, sections: [], citations: [], grounded: true }, evidence_summary: [] } as ConversationNoteDetail : null);
+
+  const updateNote = async () => {
+    if (!currentDetail) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      await axios.patch(`${API_URL}/conversation_notes/${currentDetail.id}`, {
+        note_title: currentDetail.note_title,
+        note_summary: currentDetail.note_summary ?? null,
+        note_markdown: currentDetail.note_markdown ?? '',
+      });
+      setSaveMsg('Tersimpan');
+      setTimeout(() => setSaveMsg(null), 2200);
+      await refreshNotes();
+      await loadDetail(currentDetail.id);
+    } catch {
+      setErr('Gagal menyimpan perubahan catatan.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const promoteCurrent = async () => {
+    if (!currentDetail) return;
+    setPromoting(true);
+    setErr(null);
+    try {
+      const preferred = currentDetail.library_catalog_id ?? currentDetail.match_candidates?.[0]?.catalog_id ?? null;
+      const r = await axios.post<{ ok: boolean; note: ConversationNoteDetail; library_catalog_id?: number }>(
+        `${API_URL}/conversation_notes/${currentDetail.id}/promote`,
+        { stase_slug: staseSlug, catalog_id: preferred },
+      );
+      setDetail(r.data.note);
+      setSelectedId(r.data.note.id);
+      setSaveMsg('Dipromosikan ke Library');
+      setTimeout(() => setSaveMsg(null), 2500);
+      await refreshNotes();
+      await loadDetail(currentDetail.id);
+    } catch (e: any) {
+      const reason = e?.response?.data?.reason || e?.response?.data?.error || 'Gagal mempromosikan catatan.';
+      setErr(reason);
+    } finally {
+      setPromoting(false);
+    }
+  };
+
+  const hasCandidates = (currentDetail?.match_candidates ?? []).length > 0;
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col bg-background">
+      <div className="px-4 md:px-6 py-4 border-b border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-950/70 backdrop-blur-xl">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-400 font-semibold">Conversation Notes</p>
+            <h2 className="text-xl md:text-2xl font-headline font-black text-slate-800 dark:text-slate-100">Simpan hasil chat jadi catatan</h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => void refreshNotes()} className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+              Refresh
+            </button>
+            <button onClick={onOpenLibrary} className="px-4 py-2 rounded-full text-sm border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors">
+              Buka Library
+            </button>
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari judul, query, disease..." className="w-full px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 outline-none" />
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)} className="px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 outline-none">
+            <option value="all">Semua status</option>
+            <option value="saved">Saved</option>
+            <option value="ready_to_promote">Ready to promote</option>
+            <option value="promoted_to_library">Promoted</option>
+            <option value="archived">Archived</option>
+          </select>
+          <div className="flex items-center justify-between px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/70 text-sm text-slate-500">
+            <span>{filteredNotes.length} catatan</span>
+            {saveMsg && <span className="text-emerald-600 font-semibold">{saveMsg}</span>}
+          </div>
+        </div>
+      </div>
+
+      {err && (
+        <div className="mx-4 md:mx-6 mt-4 rounded-2xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm">
+          {err}
+        </div>
+      )}
+
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)]">
+        <aside className="border-r border-slate-200/60 dark:border-slate-800 overflow-y-auto">
+          {loadingList ? (
+            <div className="p-6 text-sm text-slate-500">Memuat catatan...</div>
+          ) : filteredNotes.length === 0 ? (
+            <div className="p-6 text-sm text-slate-500">Belum ada catatan. Simpan hasil generate dari chat untuk mulai.</div>
+          ) : (
+            <div className="p-3 space-y-2">
+              {filteredNotes.map((note) => {
+                const active = currentDetail?.id === note.id;
+                return (
+                  <button
+                    key={note.id}
+                    type="button"
+                    onClick={() => void loadDetail(note.id)}
+                    className={`w-full text-left rounded-3xl border p-4 transition-all ${active ? 'border-indigo-300 bg-indigo-50/80 shadow-sm' : 'border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 hover:border-indigo-200'}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400 font-semibold">{note.note_status.replaceAll('_', ' ')}</p>
+                        <h3 className="mt-1 text-sm font-bold text-slate-800 dark:text-slate-100 truncate">{note.note_title}</h3>
+                        <p className="mt-1 text-xs text-slate-500 line-clamp-2">{note.query}</p>
+                      </div>
+                      {typeof note.citation_precision === 'number' && (
+                        <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600">
+                          {Math.round(note.citation_precision * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {note.disease_name && <span className="text-[11px] px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">{note.disease_name}</span>}
+                      {note.library_catalog_id && <span className="text-[11px] px-2 py-1 rounded-full bg-violet-50 text-violet-700 border border-violet-100">Library linked</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
+        <section className="min-h-0 overflow-y-auto p-4 md:p-6">
+          {!currentDetail ? (
+            <div className="h-full flex items-center justify-center text-slate-500">Pilih note untuk melihat detail.</div>
+          ) : loadingDetail ? (
+            <div className="h-full flex items-center justify-center text-slate-500">Memuat detail note...</div>
+          ) : (
+            <div className="space-y-5">
+              <div className="rounded-4xl border border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-5 md:p-6">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div className="min-w-0">
+                    <input
+                      value={currentDetail.note_title}
+                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_title: e.target.value } : prev)}
+                      className="w-full text-xl md:text-2xl font-headline font-black bg-transparent outline-none text-slate-800 dark:text-slate-100"
+                    />
+                    <p className="mt-1 text-sm text-slate-500">{currentDetail.query}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => void updateNote()} disabled={saving} className="px-4 py-2 rounded-full text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">
+                      {saving ? 'Menyimpan...' : 'Simpan perubahan'}
+                    </button>
+                    <button onClick={() => void promoteCurrent()} disabled={promoting} className="px-4 py-2 rounded-full text-sm border border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-600 hover:text-white disabled:opacity-60">
+                      {promoting ? 'Mempromosikan...' : 'Promote ke Library'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <span className="text-[11px] px-3 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200">{currentDetail.note_status.replaceAll('_', ' ')}</span>
+                  {currentDetail.disease_name && <span className="text-[11px] px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">{currentDetail.disease_name}</span>}
+                  {currentDetail.library_catalog_id && <span className="text-[11px] px-3 py-1 rounded-full bg-violet-50 text-violet-700 border border-violet-100">catalog_id {currentDetail.library_catalog_id}</span>}
+                  {typeof currentDetail.citation_precision === 'number' && <span className="text-[11px] px-3 py-1 rounded-full bg-sky-50 text-sky-700 border border-sky-100">Citation {Math.round(currentDetail.citation_precision * 100)}%</span>}
+                </div>
+
+                <div className="mt-5 grid grid-cols-1 gap-4">
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ringkasan Note</span>
+                    <textarea
+                      value={currentDetail.note_summary ?? ''}
+                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_summary: e.target.value } : prev)}
+                      className="mt-2 w-full min-h-24 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 outline-none"
+                      placeholder="Ringkasan singkat note"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown Note</span>
+                    <textarea
+                      value={currentDetail.note_markdown ?? ''}
+                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_markdown: e.target.value } : prev)}
+                      className="mt-2 w-full min-h-64 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 font-mono text-sm outline-none"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <div className="rounded-4xl border border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-5">
+                  <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-slate-500 mb-4">Preview Note</h3>
+                  <div className="prose prose-slate max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                      {currentDetail.note_markdown || ''}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+
+                <div className="rounded-4xl border border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-slate-500 mb-3">Evidence Ringkas</h3>
+                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                      {(currentDetail.evidence_summary || []).map((ev, idx) => (
+                        <div key={idx} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3 text-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-semibold text-slate-700 dark:text-slate-200 truncate">{ev.source_name}</p>
+                            <span className="text-[11px] text-slate-500">Hal {ev.page_no}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-slate-500 line-clamp-2">{ev.heading}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-slate-500 mb-3">Target Library</h3>
+                    <div className="space-y-3">
+                      <select
+                        value={currentDetail.library_catalog_id ?? currentDetail.match_candidates?.[0]?.catalog_id ?? ''}
+                        onChange={(e) => setDetail((prev) => prev ? { ...prev, library_catalog_id: e.target.value ? Number(e.target.value) : null } : prev)}
+                        className="w-full px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 outline-none"
+                      >
+                        <option value="">Pilih disease target</option>
+                        {(currentDetail.match_candidates || []).map((cand) => (
+                          <option key={cand.catalog_id} value={cand.catalog_id}>
+                            {cand.name} ({Math.round(cand.score * 100)}%)
+                          </option>
+                        ))}
+                      </select>
+                      {hasCandidates ? (
+                        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                          Kandidat promosi tersedia. Pilih target yang paling cocok sebelum promote.
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+                          Belum ada kandidat penyakit yang kuat. Note tetap bisa disimpan, tetapi promote ke Library akan lebih aman jika disease cocok.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function App() {
   const [query, setQuery] = useState('');
+  const [sessionId] = useState(() => getOrCreateSessionId());
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
       const saved = localStorage.getItem('medrag_chat_v3');
@@ -2111,6 +2508,15 @@ export default function App() {
   const [kgInitialDisease, setKgInitialDisease] = useState<string | null>(null); // auto-select in KG panel
   const [activeView, setActiveView] = useState<ActiveView>('chat');
   const [activeStase, setActiveStase] = useState<string>('ipd');
+  const [noteComposer, setNoteComposer] = useState<NoteComposerState>({
+    open: false,
+    source: null,
+    noteTitle: '',
+    noteSummary: '',
+    noteMarkdown: '',
+  });
+  const [noteSaveBusy, setNoteSaveBusy] = useState(false);
+  const [noteSaveMsg, setNoteSaveMsg] = useState<string | null>(null);
   const { isMobile, isTablet } = useScreenSize();
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -2193,6 +2599,61 @@ export default function App() {
   };
 
   const clearChat = () => setMessages([]);
+
+  const openNoteComposer = (response: ApiResponse) => {
+    const noteMarkdown = buildNoteMarkdownFromResponse(response);
+    const disease = response.draft_answer.disease || response.query || 'Catatan Klinis';
+    const summary = response.draft_answer.sections?.[0]?.markdown?.slice(0, 220) || '';
+    setNoteComposer({
+      open: true,
+      source: response,
+      noteTitle: disease,
+      noteSummary: summary,
+      noteMarkdown,
+    });
+  };
+
+  const saveCurrentNote = async () => {
+    if (!noteComposer.source || noteSaveBusy) return;
+    setNoteSaveBusy(true);
+    setNoteSaveMsg(null);
+    try {
+      const source = noteComposer.source;
+      const payload = {
+        stase_slug: activeStase,
+        session_id: sessionId,
+        query: source.query,
+        note_title: noteComposer.noteTitle.trim() || source.draft_answer.disease || source.query,
+        note_summary: noteComposer.noteSummary.trim() || null,
+        disease_name: source.draft_answer.disease || source.query,
+        note_markdown: noteComposer.noteMarkdown.trim() || buildNoteMarkdownFromResponse(source),
+        draft_answer: source.draft_answer,
+        evidence: source.evidence.map((item) => ({
+          source_name: item.source_name,
+          page_no: item.page_no,
+          heading: item.heading,
+          section_category: item.section_category,
+          content: item.content,
+        })),
+        evidence_quality: source.evidence_quality ?? null,
+        retrieval_diagnostics: source.retrieval_diagnostics ?? null,
+      };
+      const r = await axios.post<{ ok: boolean; note: ConversationNoteListItem }>(`${API_URL}/conversation_notes`, payload);
+      setNoteSaveMsg('Note tersimpan');
+      setTimeout(() => setNoteSaveMsg(null), 2200);
+      setNoteComposer((prev) => ({ ...prev, open: false }));
+      setActiveView('notes');
+      // Keep note list fresh when the notes panel mounts.
+      if (r.data.note?.id) {
+        // no-op, response used to confirm save succeeded
+      }
+    } catch (e: any) {
+      setNoteSaveMsg(e?.response?.data?.error || e.message || 'Gagal menyimpan note');
+      setTimeout(() => setNoteSaveMsg(null), 3500);
+    } finally {
+      setNoteSaveBusy(false);
+    }
+  };
 
   // Open KG panel and auto-select matching disease
   const handleOpenKG = (disease: string) => {
@@ -2874,6 +3335,7 @@ function AdminPanel() {
           {(
             [
               { icon: 'chat_bubble', label: 'Recent Chats', id: 'chat' as const },
+              { icon: 'note_stack', label: 'Conversation Notes', id: 'notes' as const },
               { icon: 'book', label: 'Medical Library', id: 'library' as const },
               { icon: 'hub', label: 'Knowledge Graph', id: 'kg' as const },
               { icon: 'query_stats', label: 'Analytics', id: 'analytics' as const },
@@ -2953,6 +3415,15 @@ function AdminPanel() {
         </header>
 
         {activeView === 'library' && <MedicalLibraryPanel components={mdComponents} />}
+
+        {activeView === 'notes' && (
+          <ConversationNotesPanel
+            components={mdComponents}
+            staseSlug={activeStase}
+            sessionId={sessionId}
+            onOpenLibrary={() => setActiveView('library')}
+          />
+        )}
 
         {activeView === 'kg' && (
           <KnowledgeGraphPanel
@@ -3197,6 +3668,13 @@ function AdminPanel() {
                   <button aria-label="Thumbs Down" className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
                     <span className="material-symbols-outlined text-[18px]">thumb_down</span>
                   </button>
+                  <button
+                    onClick={() => msg.data && openNoteComposer(msg.data)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-800 rounded-full hover:bg-emerald-600 hover:text-white transition-all font-medium"
+                  >
+                    <span className="material-symbols-outlined text-[15px]">sticky_note_2</span>
+                    Save as Note
+                  </button>
                   {/* Ide 18: Open Knowledge Graph */}
                   <button
                     onClick={() => handleOpenKG(msg.data!.draft_answer.disease)}
@@ -3290,6 +3768,78 @@ function AdminPanel() {
           </div>
         </div>
         </>
+        )}
+
+        {noteComposer.open && noteComposer.source && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setNoteComposer((prev) => ({ ...prev, open: false }))}>
+            <div className="bg-surface-container-lowest glass-border glass-panel rounded-t-3xl md:rounded-4xl max-w-4xl w-full max-h-[92vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="bottom-sheet-handle md:hidden mt-2" />
+              <div className="flex items-center justify-between gap-3 p-4 md:p-6 border-b border-surface-variant/60">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400 font-semibold">Save Conversation Note</p>
+                  <h3 className="text-lg md:text-2xl font-headline font-black text-slate-800 dark:text-slate-100">Simpan hasil generate ke Supabase</h3>
+                </div>
+                <button onClick={() => setNoteComposer((prev) => ({ ...prev, open: false }))} className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
+                  <span className="material-symbols-outlined text-[20px]">close</span>
+                </button>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] min-h-0 flex-1">
+                <div className="p-4 md:p-6 overflow-y-auto space-y-4">
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Judul Note</span>
+                    <input value={noteComposer.noteTitle} onChange={(e) => setNoteComposer((prev) => ({ ...prev, noteTitle: e.target.value }))} className="mt-2 w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 px-4 py-3 outline-none" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ringkasan</span>
+                    <textarea value={noteComposer.noteSummary} onChange={(e) => setNoteComposer((prev) => ({ ...prev, noteSummary: e.target.value }))} className="mt-2 w-full min-h-24 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 px-4 py-3 outline-none" placeholder="Ringkasan singkat untuk catatan" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown Note</span>
+                    <textarea value={noteComposer.noteMarkdown} onChange={(e) => setNoteComposer((prev) => ({ ...prev, noteMarkdown: e.target.value }))} className="mt-2 w-full min-h-104 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 px-4 py-3 font-mono text-sm outline-none" />
+                  </label>
+                </div>
+                <div className="border-t lg:border-t-0 lg:border-l border-slate-200/60 dark:border-slate-800 p-4 md:p-6 overflow-y-auto space-y-4 bg-white/40 dark:bg-slate-950/30">
+                  <div className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">Preview</p>
+                    <div className="prose prose-slate max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                        {noteComposer.noteMarkdown || ''}
+                      </ReactMarkdown>
+                    </div>
+                  </div>
+                  <div className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-400 font-semibold">Source</p>
+                      <p className="mt-1">{noteComposer.source.query}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-400 font-semibold">Disease</p>
+                      <p className="mt-1">{noteComposer.source.draft_answer.disease || 'Tidak terdeteksi'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-400 font-semibold">Evidence</p>
+                      <p className="mt-1">{noteComposer.source.evidence.length} potongan bukti</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 md:p-6 border-t border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-950/40">
+                <p className="text-sm text-slate-500">Note ini akan disimpan di Supabase dan bisa dipromosikan ke Medical Library jika disease cocok.</p>
+                <div className="flex items-center gap-2 justify-end">
+                  <button onClick={() => setNoteComposer((prev) => ({ ...prev, open: false }))} className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80">Batal</button>
+                  <button onClick={() => void saveCurrentNote()} disabled={noteSaveBusy} className="px-4 py-2 rounded-full text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">
+                    {noteSaveBusy ? 'Menyimpan...' : 'Simpan Note'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {noteSaveMsg && (
+          <div className="fixed bottom-6 right-6 z-60 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 shadow-lg shadow-emerald-200/40">
+            {noteSaveMsg}
+          </div>
         )}
 
         {/* ── Evidence Modal ── */}

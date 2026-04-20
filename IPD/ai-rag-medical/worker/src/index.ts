@@ -30,6 +30,7 @@ import {
   isListingIntent,
   resolveRetrievalMode,
   buildQuestionPlan,
+  scoreMedicalTermSimilarity,
 } from "./medical-vocab";
 import { embedTexts, parsePageForIndexing } from "./indexer";
 
@@ -184,6 +185,33 @@ const MindmapSaveSchema = z.object({
 const MergeMarkdownSchema = z.object({
   markdown_base: z.string().default(""),
   markdown_candidate: z.string().min(1),
+});
+
+const ConversationNoteEvidenceSchema = z.object({
+  source_name: z.string().min(1),
+  page_no: z.number().int().min(0),
+  heading: z.string().default(""),
+  section_category: z.string().optional(),
+  content: z.string().optional(),
+});
+
+const ConversationNoteCreateSchema = z.object({
+  stase_slug: z.string().optional().default("ipd"),
+  session_id: z.string().min(6),
+  query: z.string().min(2),
+  note_title: z.string().optional(),
+  note_summary: z.string().optional().nullable(),
+  disease_name: z.string().optional().nullable(),
+  note_markdown: z.string().optional().nullable(),
+  draft_answer: z.record(z.string(), z.unknown()),
+  evidence: z.array(ConversationNoteEvidenceSchema).default([]),
+  evidence_quality: z.string().optional().nullable(),
+  retrieval_diagnostics: z.record(z.string(), z.unknown()).optional().nullable(),
+});
+
+const ConversationNotePromoteSchema = z.object({
+  stase_slug: z.string().optional().default("ipd"),
+  catalog_id: z.number().int().min(1).nullable().optional(),
 });
 
 const LibraryVisualRefItemSchema = z.object({
@@ -664,6 +692,103 @@ async function upsertLibraryArticleMarkdown(
   );
 
   return { status, newMeta };
+}
+
+function noteMarkdownFromDraftAnswer(draft: Record<string, unknown>): string {
+  const diseaseTitle = String(draft["disease"] ?? "Catatan Klinis");
+  const sections = draft["sections"] as Array<{ title?: string; markdown?: string; points?: string[] }> | undefined;
+  const parts = [`# ${diseaseTitle}`];
+  for (const sec of sections ?? []) {
+    const title = sec.title ?? "Section";
+    let md = (sec.markdown ?? "").trim();
+    if (!md && sec.points) md = sec.points.map((p) => `- ${p}`).join("\n");
+    if (md) parts.push(`\n## ${title}\n\n${md}`);
+  }
+  if (parts.length === 1) {
+    parts.push("\n## Ringkasan\n\nBelum ada section yang bisa diekspor.");
+  }
+  return parts.join("\n").trim() + "\n";
+}
+
+function summarizeNoteEvidence(evidence: Array<{ source_name: string; page_no: number; heading: string; section_category?: string; content?: string }>): Array<Record<string, unknown>> {
+  return evidence.slice(0, 8).map((item) => ({
+    source_name: item.source_name,
+    page_no: item.page_no,
+    heading: item.heading,
+    section_category: item.section_category ?? null,
+    content_preview: (item.content ?? "").slice(0, 240),
+  }));
+}
+
+function diseaseScoreCandidates(rows: Array<Record<string, unknown>>, query: string): Array<{ catalog_id: number; name: string; stable_key?: string; score: number }> {
+  return rows
+    .map((row) => {
+      const name = String(row.name ?? "");
+      const stableKey = String(row.stable_key ?? "");
+      const score = Math.max(
+        scoreMedicalTermSimilarity(query, name),
+        scoreMedicalTermSimilarity(query, stableKey),
+      );
+      return { catalog_id: Number(row.id), name, stable_key: stableKey, score };
+    })
+    .filter((item) => item.name && item.score > 0.25)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+}
+
+async function findDiseaseMatches(
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  query: string,
+): Promise<Array<{ catalog_id: number; name: string; stable_key?: string; score: number }>> {
+  const { data: stase } = await supabase.from("stase").select("id").eq("slug", staseSlug).single();
+  if (!stase) return [];
+  const staseId = (stase as Record<string, unknown>)["id"];
+  const { data } = await supabase
+    .from("disease_catalog")
+    .select("id, name, stable_key")
+    .eq("stase_id", staseId as number)
+    .order("catalog_no");
+  return diseaseScoreCandidates((data ?? []) as Array<Record<string, unknown>>, query);
+}
+
+async function upsertLibraryArticleFromNote(
+  supabase: ReturnType<typeof getSupabase>,
+  catalogId: number,
+  markdownBody: string,
+  note: Record<string, unknown>,
+): Promise<void> {
+  const hash = await contentHash(markdownBody);
+  const existing = await supabase
+    .from("library_article")
+    .select("status, content_markdown, meta, mindmap, content_hash")
+    .eq("catalog_id", catalogId)
+    .maybeSingle();
+
+  const prevMeta = ((existing.data as Record<string, unknown> | null)?.meta as Record<string, unknown>) ?? {};
+  const nextMeta = {
+    ...prevMeta,
+    source: "conversation_note",
+    source_note_id: note["id"],
+    source_note_title: note["note_title"],
+    source_note_query: note["query"],
+    promoted_at: new Date().toISOString(),
+    last_operation: "promote_from_note",
+    updated_at: new Date().toISOString(),
+  };
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status: "draft",
+      content_markdown: markdownBody,
+      meta: nextMeta,
+      mindmap: (existing.data as Record<string, unknown> | null)?.mindmap ?? null,
+      content_hash: hash,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1235,6 +1360,174 @@ app.post("/library/merge_markdown_copilot", async (c) => {
     c.env.GITHUB_TOKEN,
   );
   return c.json({ ok: true, markdown_merged: merged });
+});
+
+app.post("/conversation_notes", async (c) => {
+  const payload = await parseBody(c, ConversationNoteCreateSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const staseSlug = payload.stase_slug ?? "ipd";
+  const noteMarkdown = (payload.note_markdown ?? "").trim() || noteMarkdownFromDraftAnswer(payload.draft_answer);
+  const noteTitle = (payload.note_title ?? "").trim() || String(payload.disease_name ?? payload.query).slice(0, 96);
+  const evidenceSummary = summarizeNoteEvidence(payload.evidence);
+  const citationQuality = (payload.draft_answer["citation_quality"] as Record<string, unknown> | undefined) ?? {};
+  const retrievalMetadata = {
+    ...(payload.retrieval_diagnostics ?? {}),
+    evidence_quality: payload.evidence_quality ?? null,
+    retrieval_passes: payload.draft_answer["retrieval_passes"] ?? null,
+    retry_mode: payload.draft_answer["retry_mode"] ?? null,
+    retry_reason: payload.draft_answer["retry_reason"] ?? null,
+  };
+  const diseaseName = (payload.disease_name ?? payload.query).trim() || null;
+  const candidates = await findDiseaseMatches(supabase, staseSlug, diseaseName ?? payload.query);
+  const noteStatus = candidates.length > 0 ? "ready_to_promote" : "saved";
+
+  const insertPayload = {
+    stase_slug: staseSlug,
+    session_id: payload.session_id,
+    query: payload.query,
+    note_title: noteTitle,
+    note_summary: (payload.note_summary ?? null) || null,
+    disease_name: diseaseName,
+    note_markdown: noteMarkdown,
+    draft_answer: payload.draft_answer,
+    evidence_summary: evidenceSummary,
+    citation_quality: citationQuality,
+    retrieval_metadata: retrievalMetadata,
+    note_status: noteStatus,
+    library_catalog_id: null,
+    match_candidates: candidates,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from("conversation_notes")
+    .insert(insertPayload)
+    .select("*")
+    .single();
+
+  if (error || !data) return c.json({ error: error?.message ?? "Failed to save note" }, 500);
+
+  return c.json({ ok: true, note: data, match_candidates: candidates });
+});
+
+app.get("/conversation_notes", async (c) => {
+  const sessionId = c.req.query("session_id");
+  const staseSlug = c.req.query("stase_slug") ?? "ipd";
+  const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "30", 10) || 30, 1), 100);
+  const supabase = getSupabase(c.env);
+
+  let query = supabase
+    .from("conversation_notes")
+    .select("id, stase_slug, session_id, query, note_title, disease_name, note_status, library_catalog_id, note_summary, created_at, updated_at, citation_quality, match_candidates")
+    .eq("stase_slug", staseSlug)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  if (sessionId) query = query.eq("session_id", sessionId);
+
+  const { data, error } = await query;
+  if (error) return c.json({ error: error.message }, 500);
+
+  return c.json({ ok: true, notes: data ?? [] });
+});
+
+app.get("/conversation_notes/:note_id", async (c) => {
+  const noteId = parseInt(c.req.param("note_id"), 10);
+  const supabase = getSupabase(c.env);
+  const { data, error } = await supabase.from("conversation_notes").select("*").eq("id", noteId).single();
+  if (error || !data) return c.json({ error: "Note not found" }, 404);
+  return c.json({ ok: true, note: data });
+});
+
+app.patch("/conversation_notes/:note_id", async (c) => {
+  const noteId = parseInt(c.req.param("note_id"), 10);
+  const payload = await parseBody(c, z.object({
+    note_title: z.string().optional(),
+    note_summary: z.string().optional().nullable(),
+    note_markdown: z.string().optional(),
+    note_status: z.enum(["draft", "saved", "ready_to_promote", "promoted_to_library", "archived", "deleted"]).optional(),
+  }));
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (payload.note_title !== undefined) updates.note_title = payload.note_title.trim();
+  if (payload.note_summary !== undefined) updates.note_summary = payload.note_summary;
+  if (payload.note_markdown !== undefined) updates.note_markdown = payload.note_markdown;
+  if (payload.note_status !== undefined) updates.note_status = payload.note_status;
+
+  const { data, error } = await supabase
+    .from("conversation_notes")
+    .update(updates)
+    .eq("id", noteId)
+    .select("*")
+    .single();
+
+  if (error || !data) return c.json({ error: error?.message ?? "Failed to update note" }, 500);
+  return c.json({ ok: true, note: data });
+});
+
+app.delete("/conversation_notes/:note_id", async (c) => {
+  const noteId = parseInt(c.req.param("note_id"), 10);
+  const supabase = getSupabase(c.env);
+  const { data, error } = await supabase
+    .from("conversation_notes")
+    .update({ note_status: "deleted", updated_at: new Date().toISOString() })
+    .eq("id", noteId)
+    .select("*")
+    .single();
+  if (error || !data) return c.json({ error: error?.message ?? "Failed to delete note" }, 500);
+  return c.json({ ok: true, note: data });
+});
+
+app.post("/conversation_notes/:note_id/promote", async (c) => {
+  const noteId = parseInt(c.req.param("note_id"), 10);
+  const payload = await parseBody(c, ConversationNotePromoteSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const { data: note, error: noteError } = await supabase.from("conversation_notes").select("*").eq("id", noteId).single();
+  if (noteError || !note) return c.json({ error: "Note not found" }, 404);
+
+  const noteRow = note as Record<string, unknown>;
+  const staseSlug = payload.stase_slug ?? (noteRow["stase_slug"] as string) ?? "ipd";
+  let catalogId = payload.catalog_id ?? (noteRow["library_catalog_id"] as number | null | undefined) ?? null;
+  let matchCandidates: Array<{ catalog_id: number; name: string; stable_key?: string; score: number }> = (noteRow["match_candidates"] as Array<{ catalog_id: number; name: string; stable_key?: string; score: number }> | undefined) ?? [];
+
+  if (!catalogId) {
+    matchCandidates = await findDiseaseMatches(supabase, staseSlug, String(noteRow["disease_name"] ?? noteRow["query"] ?? ""));
+    const top = matchCandidates[0];
+    if (!top || top.score < 0.45) {
+      return c.json({ ok: false, reason: "No strong disease match", candidates: matchCandidates }, 409);
+    }
+    catalogId = top.catalog_id;
+  }
+
+  const markdownBody = String(noteRow["note_markdown"] ?? "").trim() || noteMarkdownFromDraftAnswer(noteRow["draft_answer"] as Record<string, unknown>);
+  await upsertLibraryArticleFromNote(supabase, catalogId, markdownBody, noteRow);
+
+  const updated = await supabase
+    .from("conversation_notes")
+    .update({
+      note_status: "promoted_to_library",
+      library_catalog_id: catalogId,
+      match_candidates: matchCandidates,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", noteId)
+    .select("*")
+    .single();
+
+  if (updated.error || !updated.data) return c.json({ error: updated.error?.message ?? "Failed to update note status" }, 500);
+
+  return c.json({
+    ok: true,
+    note: updated.data,
+    library_catalog_id: catalogId,
+    match_candidates: matchCandidates,
+  });
 });
 
 app.get("/library/stases/:slug/diseases", async (c) => {
