@@ -138,7 +138,17 @@ type LibraryDiseaseDetail = {
   disease: Record<string, unknown>;
   markdown: string | null;
   meta: Record<string, unknown> | null;
+  versions?: LibraryVersionSnapshot[];
   images: ImageItem[];
+};
+
+type LibraryVersionSnapshot = {
+  id: string;
+  label: string;
+  content_hash?: string;
+  created_at: string;
+  source_operation?: string | null;
+  excerpt?: string;
 };
 
 type LibraryPreviewResponse = {
@@ -1560,7 +1570,21 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [webSearchRequestId, setWebSearchRequestId] = useState<string | null>(null);
   const [webSearchResolvedType, setWebSearchResolvedType] = useState<string | null>(null);
   const [webSearchSearchTime, setWebSearchSearchTime] = useState<number | null>(null);
+  const [versionBusy, setVersionBusy] = useState(false);
   const { isMobile: libMobile } = useScreenSize();
+
+  const formatVersionDate = (value?: string) => {
+    if (!value) return '-';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return value;
+    return dt.toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
 
   useEffect(() => {
     if (libMobile && listCollapsed) {
@@ -1790,6 +1814,54 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       setErr('Penghapusan gagal.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleSaveVersion = async () => {
+    if (!selectedId || !detail?.markdown?.trim()) return;
+    const label = window.prompt('Label versi backup (opsional):', `Backup ${new Date().toLocaleString('id-ID')}`) || undefined;
+    setVersionBusy(true);
+    setErr(null);
+    try {
+      await axios.post(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/versions`, {
+        label: label?.trim() || undefined,
+      });
+      await loadDetail(selectedId);
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || 'Gagal menyimpan versi backup.');
+    } finally {
+      setVersionBusy(false);
+    }
+  };
+
+  const handleUseVersion = async (versionId: string) => {
+    if (!selectedId) return;
+    if (!window.confirm('Gunakan versi ini sebagai artikel aktif sekarang?')) return;
+    setVersionBusy(true);
+    setErr(null);
+    try {
+      await axios.post(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/versions/${encodeURIComponent(versionId)}/use`);
+      await loadDiseases();
+      await loadDetail(selectedId);
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || 'Gagal menggunakan versi terpilih.');
+    } finally {
+      setVersionBusy(false);
+    }
+  };
+
+  const handleRemoveVersion = async (versionId: string) => {
+    if (!selectedId) return;
+    if (!window.confirm('Hapus versi ini permanen?')) return;
+    setVersionBusy(true);
+    setErr(null);
+    try {
+      await axios.delete(`${API_URL}/library/stases/${staseSlug}/diseases/${selectedId}/versions/${encodeURIComponent(versionId)}`);
+      await loadDetail(selectedId);
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || 'Gagal menghapus versi.');
+    } finally {
+      setVersionBusy(false);
     }
   };
 
@@ -2278,6 +2350,14 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
+                        disabled={busy || versionBusy || !detail.markdown?.trim()}
+                        onClick={() => void handleSaveVersion()}
+                        className="px-3 py-1.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 text-sm hover:bg-emerald-100 disabled:opacity-50"
+                      >
+                        {versionBusy ? 'Menyimpan versi…' : 'Save Version'}
+                      </button>
+                      <button
+                        type="button"
                         disabled={busy || !detail.markdown}
                         onClick={() => {
                           setEditMarkdown(detail.markdown || '');
@@ -2329,6 +2409,59 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   placeholder="Contoh: tekankan diagnosis banding dan red flag..."
                   className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-transparent px-3 py-2 text-sm min-h-18"
                 />
+              </div>
+
+              <div className="rounded-2xl border border-slate-200/80 dark:border-slate-700 p-4 bg-white/70 dark:bg-slate-900/40 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-headline text-sm font-bold text-slate-500 flex items-center gap-2 uppercase tracking-widest">
+                    <span className="material-symbols-outlined text-[18px]">history</span>
+                    Version Backup
+                  </h3>
+                  <button
+                    type="button"
+                    disabled={busy || versionBusy || !detail.markdown?.trim()}
+                    onClick={() => void handleSaveVersion()}
+                    className="text-xs px-3 py-1.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                  >
+                    {versionBusy ? 'Menyimpan…' : 'Save Version'}
+                  </button>
+                </div>
+
+                {Array.isArray(detail.versions) && detail.versions.length > 0 ? (
+                  <div className="space-y-2">
+                    {detail.versions.map((v, idx) => (
+                      <div key={v.id} className="rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/80 dark:bg-slate-900/60 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">{v.label || `Version ${idx + 1}`}</p>
+                            <p className="text-[11px] text-slate-500 mt-0.5">{formatVersionDate(v.created_at)} {v.source_operation ? `• ${v.source_operation}` : ''}</p>
+                            {v.excerpt && <p className="text-xs text-slate-500 mt-1 line-clamp-2">{v.excerpt}</p>}
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              disabled={busy || versionBusy}
+                              onClick={() => void handleUseVersion(v.id)}
+                              className="px-3 py-1.5 rounded-full text-xs border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                            >
+                              Use this version
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy || versionBusy}
+                              onClick={() => void handleRemoveVersion(v.id)}
+                              className="px-3 py-1.5 rounded-full text-xs border border-rose-200 text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                            >
+                              Remove version
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">Belum ada backup version. Klik Save Version untuk menyimpan snapshot artikel saat ini.</p>
+                )}
               </div>
 
               {detail.images && detail.images.length > 0 && (

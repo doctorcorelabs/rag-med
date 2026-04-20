@@ -115,6 +115,10 @@ const LibraryPatchContentSchema = z.object({
   preview_commit: z.boolean().default(false),
 });
 
+const LibrarySaveVersionSchema = z.object({
+  label: z.string().trim().min(1).max(80).optional(),
+});
+
 const SourceCreateSchema = z.object({
   source_name: z.string().min(3),
 });
@@ -505,6 +509,84 @@ async function contentHash(text: string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+type LibraryVersionSnapshot = {
+  id: string;
+  label: string;
+  markdown: string;
+  content_hash: string;
+  created_at: string;
+  source_operation?: string;
+};
+
+const VERSION_BACKUPS_KEY = "version_backups";
+const MAX_VERSION_BACKUPS = 10;
+
+function parseVersionSnapshots(meta: Record<string, unknown>): LibraryVersionSnapshot[] {
+  const raw = meta[VERSION_BACKUPS_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const id = String(row.id ?? "").trim();
+      const markdown = String(row.markdown ?? "").trim();
+      if (!id || !markdown) return null;
+      return {
+        id,
+        label: String(row.label ?? "Backup version"),
+        markdown,
+        content_hash: String(row.content_hash ?? ""),
+        created_at: String(row.created_at ?? ""),
+        source_operation: row.source_operation ? String(row.source_operation) : undefined,
+      } as LibraryVersionSnapshot;
+    })
+    .filter((item): item is LibraryVersionSnapshot => Boolean(item))
+    .sort((a, b) => {
+      const ta = Date.parse(a.created_at || "");
+      const tb = Date.parse(b.created_at || "");
+      return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    });
+}
+
+function withVersionSnapshots(meta: Record<string, unknown>, snapshots: LibraryVersionSnapshot[]): Record<string, unknown> {
+  return {
+    ...meta,
+    [VERSION_BACKUPS_KEY]: snapshots
+      .slice(0, MAX_VERSION_BACKUPS)
+      .map((item) => ({
+        id: item.id,
+        label: item.label,
+        markdown: item.markdown,
+        content_hash: item.content_hash,
+        created_at: item.created_at,
+        source_operation: item.source_operation,
+      })),
+  };
+}
+
+function snapshotsWithoutMarkdown(snapshots: LibraryVersionSnapshot[]): Array<Record<string, unknown>> {
+  return snapshots.map((item) => ({
+    id: item.id,
+    label: item.label,
+    content_hash: item.content_hash,
+    created_at: item.created_at,
+    source_operation: item.source_operation ?? null,
+    excerpt: item.markdown.replace(/\s+/g, " ").slice(0, 180),
+  }));
+}
+
+function buildVersionSnapshot(markdown: string, contentHashValue: string, label?: string, sourceOperation?: string): LibraryVersionSnapshot {
+  const now = new Date().toISOString();
+  return {
+    id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: (label || `Backup ${now.slice(0, 16).replace("T", " ")}`).trim(),
+    markdown,
+    content_hash: contentHashValue,
+    created_at: now,
+    source_operation: sourceOperation,
+  };
+}
+
 /** PostgREST/Supabase embeds one-to-one FK relations as a single object; one-to-many as an array. */
 function embeddedLibraryArticle(raw: unknown): Record<string, unknown> | undefined {
   if (raw == null) return undefined;
@@ -833,6 +915,7 @@ async function upsertLibraryArticleMarkdown(
   const la = embeddedLibraryArticle(bundle["library_article"]);
   const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
   const ver = ((prevMeta["version"] as number) ?? 0) + 1;
+  const snapshots = parseVersionSnapshots(prevMeta);
 
   const newMeta: Record<string, unknown> = {
     version: ver,
@@ -844,20 +927,21 @@ async function upsertLibraryArticleMarkdown(
     last_operation: lastOperation,
     images: gen.images,
   };
+  const newMetaWithSnapshots = withVersionSnapshots(newMeta, snapshots);
 
   await supabase.from("library_article").upsert(
     {
       catalog_id: catalogId,
       status,
       content_markdown: markdownBody,
-      meta: newMeta,
+      meta: newMetaWithSnapshots,
       content_hash: hash,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "catalog_id" },
   );
 
-  return { status, newMeta };
+  return { status, newMeta: newMetaWithSnapshots };
 }
 
 function noteMarkdownFromDraftAnswer(draft: Record<string, unknown>): string {
@@ -1906,8 +1990,146 @@ app.get("/library/stases/:slug/diseases/:catalog_id", async (c) => {
     disease: bundleWithoutArticle,
     markdown: la?.["content_markdown"] ?? null,
     meta,
+    versions: snapshotsWithoutMarkdown(parseVersionSnapshots(meta)),
     images,
   });
+});
+
+app.get("/library/stases/:slug/diseases/:catalog_id/versions", async (c) => {
+  const slug = c.req.param("slug");
+  const catalogId = parseInt(c.req.param("catalog_id"), 10);
+  const bundle = await getBundleOrFail(c.env, slug, catalogId);
+  if (!bundle) return c.json({ error: "Disease not found" }, 404);
+
+  const la = embeddedLibraryArticle(bundle["library_article"]);
+  const meta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const snapshots = parseVersionSnapshots(meta);
+  return c.json({ ok: true, versions: snapshotsWithoutMarkdown(snapshots) });
+});
+
+app.post("/library/stases/:slug/diseases/:catalog_id/versions", async (c) => {
+  const slug = c.req.param("slug");
+  const catalogId = parseInt(c.req.param("catalog_id"), 10);
+  const payload = await parseBody(c, LibrarySaveVersionSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const bundle = await getBundleOrFail(c.env, slug, catalogId);
+  if (!bundle) return c.json({ error: "Disease not found" }, 404);
+
+  const la = embeddedLibraryArticle(bundle["library_article"]);
+  const markdown = ((la?.["content_markdown"] as string | null) ?? "").trim();
+  if (!markdown) return c.json({ error: "Tidak ada artikel aktif untuk disimpan sebagai versi." }, 400);
+
+  const currentHash = (la?.["content_hash"] as string | null) ?? (await contentHash(markdown));
+  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const snapshots = parseVersionSnapshots(prevMeta);
+  const duplicate = snapshots.find((item) => item.content_hash === currentHash);
+  if (duplicate) {
+    return c.json({ ok: true, created: false, message: "Konten aktif sama dengan versi backup yang sudah ada.", version: duplicate, versions: snapshotsWithoutMarkdown(snapshots) });
+  }
+
+  const next = [buildVersionSnapshot(markdown, currentHash, payload.label, String(prevMeta["last_operation"] ?? "manual")), ...snapshots]
+    .slice(0, MAX_VERSION_BACKUPS);
+  const nextMeta = withVersionSnapshots(prevMeta, next);
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status: (la?.["status"] as string) ?? "draft",
+      content_markdown: la?.["content_markdown"] ?? markdown,
+      meta: nextMeta,
+      mindmap: la?.["mindmap"] ?? null,
+      content_hash: currentHash,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
+
+  return c.json({ ok: true, created: true, version: snapshotsWithoutMarkdown([next[0]])[0], versions: snapshotsWithoutMarkdown(next) });
+});
+
+app.post("/library/stases/:slug/diseases/:catalog_id/versions/:version_id/use", async (c) => {
+  const slug = c.req.param("slug");
+  const catalogId = parseInt(c.req.param("catalog_id"), 10);
+  const versionId = c.req.param("version_id");
+
+  const supabase = getSupabase(c.env);
+  const bundle = await getBundleOrFail(c.env, slug, catalogId);
+  if (!bundle) return c.json({ error: "Disease not found" }, 404);
+
+  const la = embeddedLibraryArticle(bundle["library_article"]);
+  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const snapshots = parseVersionSnapshots(prevMeta);
+  const selected = snapshots.find((item) => item.id === versionId);
+  if (!selected) return c.json({ error: "Version not found" }, 404);
+
+  const newMeta = withVersionSnapshots(
+    {
+      ...prevMeta,
+      last_operation: "use_version_backup",
+      last_used_version_id: selected.id,
+      last_used_version_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    snapshots,
+  );
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status: "published",
+      content_markdown: selected.markdown,
+      meta: newMeta,
+      mindmap: la?.["mindmap"] ?? null,
+      content_hash: selected.content_hash || (await contentHash(selected.markdown)),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
+
+  return c.json({ ok: true, markdown: selected.markdown, used_version_id: selected.id, versions: snapshotsWithoutMarkdown(snapshots) });
+});
+
+app.delete("/library/stases/:slug/diseases/:catalog_id/versions/:version_id", async (c) => {
+  const slug = c.req.param("slug");
+  const catalogId = parseInt(c.req.param("catalog_id"), 10);
+  const versionId = c.req.param("version_id");
+
+  const supabase = getSupabase(c.env);
+  const bundle = await getBundleOrFail(c.env, slug, catalogId);
+  if (!bundle) return c.json({ error: "Disease not found" }, 404);
+
+  const la = embeddedLibraryArticle(bundle["library_article"]);
+  const prevMeta = (la?.["meta"] as Record<string, unknown>) ?? {};
+  const snapshots = parseVersionSnapshots(prevMeta);
+  const next = snapshots.filter((item) => item.id !== versionId);
+  if (next.length === snapshots.length) return c.json({ error: "Version not found" }, 404);
+
+  const nextMeta = withVersionSnapshots(
+    {
+      ...prevMeta,
+      last_operation: "remove_version_backup",
+      last_removed_version_id: versionId,
+      updated_at: new Date().toISOString(),
+    },
+    next,
+  );
+
+  await supabase.from("library_article").upsert(
+    {
+      catalog_id: catalogId,
+      status: (la?.["status"] as string) ?? "draft",
+      content_markdown: (la?.["content_markdown"] as string | null) ?? null,
+      meta: nextMeta,
+      mindmap: la?.["mindmap"] ?? null,
+      content_hash: (la?.["content_hash"] as string | null) ?? null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "catalog_id" },
+  );
+
+  return c.json({ ok: true, versions: snapshotsWithoutMarkdown(next) });
 });
 
 // ─── Article CRUD ─────────────────────────────────────────────────────────────
