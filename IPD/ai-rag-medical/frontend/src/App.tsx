@@ -2655,12 +2655,6 @@ export default function App() {
     }
   };
 
-  // Open KG panel and auto-select matching disease
-  const handleOpenKG = (disease: string) => {
-    setKgInitialDisease(disease);
-    setActiveView('kg');
-  };
-
   // ─── Render section content ──
   const renderSection = (section: DraftSection, sIdx: number, confidence?: number) => {
     const icon = SECTION_ICONS[section.title] || 'article';
@@ -3675,14 +3669,6 @@ function AdminPanel() {
                     <span className="material-symbols-outlined text-[15px]">sticky_note_2</span>
                     Save as Note
                   </button>
-                  {/* Ide 18: Open Knowledge Graph */}
-                  <button
-                    onClick={() => handleOpenKG(msg.data!.draft_answer.disease)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400 border border-violet-100 dark:border-violet-800 rounded-full hover:bg-violet-600 hover:text-white transition-all font-medium"
-                  >
-                    <span className="material-symbols-outlined text-[15px]">hub</span>
-                    Knowledge Graph
-                  </button>
                 </div>
               )}
             </div>
@@ -3824,7 +3810,7 @@ function AdminPanel() {
                 </div>
               </div>
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 md:p-6 border-t border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-950/40">
-                <p className="text-sm text-slate-500">Note ini akan disimpan di Supabase dan bisa dipromosikan ke Medical Library jika disease cocok.</p>
+                <p className="text-sm text-slate-500">Note akan disimpan langsung. Pemilihan penyakit Medical Library dilakukan saat proses promote.</p>
                 <div className="flex items-center gap-2 justify-end">
                   <button onClick={() => setNoteComposer((prev) => ({ ...prev, open: false }))} className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80">Batal</button>
                   <button onClick={() => void saveCurrentNote()} disabled={noteSaveBusy} className="px-4 py-2 rounded-full text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">
