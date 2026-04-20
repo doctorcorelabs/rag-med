@@ -239,6 +239,13 @@ export interface DraftAnswer {
   detection_confidence?: number;
   answer_confidence?: number;
   section_confidence_map?: Record<string, number>;
+  citation_quality?: {
+    overall_precision: number;
+    section_precision_map: Record<string, number>;
+    total_citations: number;
+    relevant_citations: number;
+    filtered_citations: number;
+  };
   retrieval_passes?: number;
   evidence_coverage?: {
     total_evidence: number;

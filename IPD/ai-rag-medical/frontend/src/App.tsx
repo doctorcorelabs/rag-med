@@ -48,6 +48,13 @@ type ApiResponse = {
     grounded: boolean;
     answer_confidence?: number;
     section_confidence_map?: Record<string, number>;
+    citation_quality?: {
+      overall_precision: number;
+      section_precision_map: Record<string, number>;
+      total_citations: number;
+      relevant_citations: number;
+      filtered_citations: number;
+    };
     question_style?: string;
     detection_method?: string;
     detection_confidence?: number;
@@ -3047,6 +3054,17 @@ function AdminPanel() {
                             {typeof msg.data.draft_answer.retrieval_passes === 'number' && (
                               <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-slate-50 text-slate-600 border-slate-200">
                                 Retrieval {msg.data.draft_answer.retrieval_passes}x
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.citation_quality?.overall_precision === 'number' && (
+                              <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border ${
+                                msg.data.draft_answer.citation_quality.overall_precision >= 0.7
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : msg.data.draft_answer.citation_quality.overall_precision >= 0.45
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                    : 'bg-rose-50 text-rose-700 border-rose-200'
+                              }`}>
+                                Citation {Math.round(msg.data.draft_answer.citation_quality.overall_precision * 100)}%
                               </span>
                             )}
                             {typeof msg.data.draft_answer.question_style === 'string' && (

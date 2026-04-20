@@ -14,6 +14,12 @@ import {
 const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
 const COPILOT_CHAT_URL = "https://api.githubcopilot.com/chat/completions";
 const EVIDENCE_REF_RE = /\[E(\d+)\]/g;
+const EVIDENCE_BLOCK_RE = /\[([^\]]+)\]/g;
+const RELEVANCE_STOPWORDS = new Set([
+  "yang", "dan", "atau", "dengan", "dari", "untuk", "pada", "oleh", "sebagai",
+  "adalah", "dalam", "karena", "jika", "maka", "serta", "jadi", "agar", "terhadap",
+  "pasien", "klinis", "penyakit", "kondisi", "section", "bagian", "terapi", "diagnosis",
+]);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Token acquisition
@@ -135,17 +141,133 @@ function resolveEvidenceCitations(
   text: string,
   evidence: ChunkRecord[],
 ): string {
-  const resolved = text.replace(EVIDENCE_REF_RE, (_match, numStr) => {
-    const idx = parseInt(numStr, 10);
-    if (idx >= 1 && idx <= evidence.length) {
+  const resolved = text.replace(EVIDENCE_BLOCK_RE, (match, block) => {
+    const refs = extractEvidenceRefsFromBlock(block, evidence.length);
+    if (!refs.length) return match;
+    const mapped = refs.map((idx) => {
       const item = evidence[idx - 1];
       return `(${item.source_name}, Hal ${item.page_no})`;
-    }
-    return "";
+    });
+    return mapped.join(" ");
   });
 
   // Clean up unresolved singleton [E#] references so user output stays readable.
-  return resolved.replace(EVIDENCE_REF_RE, "").replace(/\s{2,}/g, " ").trim();
+  return resolved
+    .replace(EVIDENCE_REF_RE, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:])/g, "$1")
+    .trim();
+}
+
+function extractEvidenceRefsFromBlock(block: string, maxEvidence: number): number[] {
+  const ids = new Set<number>();
+  const matches = block.matchAll(/E\s*(\d+)/gi);
+  for (const m of matches) {
+    const idx = parseInt(m[1], 10);
+    if (idx >= 1 && idx <= maxEvidence) ids.add(idx);
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+function extractEvidenceRefsFromText(text: string, maxEvidence: number): number[] {
+  const ids = new Set<number>();
+  let m: RegExpExecArray | null;
+  const re = new RegExp(EVIDENCE_BLOCK_RE.source, "g");
+  while ((m = re.exec(text)) !== null) {
+    for (const idx of extractEvidenceRefsFromBlock(m[1], maxEvidence)) ids.add(idx);
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+function normalizeRelevanceText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(EVIDENCE_BLOCK_RE, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeRelevance(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const tok of normalizeRelevanceText(text).split(" ")) {
+    if (!tok || tok.length < 4) continue;
+    if (RELEVANCE_STOPWORDS.has(tok)) continue;
+    tokens.add(tok);
+  }
+  return tokens;
+}
+
+function scoreCitationRelevance(sectionText: string, item: ChunkRecord): number {
+  const sectionTokens = tokenizeRelevance(sectionText);
+  if (sectionTokens.size === 0) return 0;
+
+  const evidenceSurface = [
+    item.heading,
+    item.parent_heading,
+    item.section_category,
+    (item.content ?? "").slice(0, 320),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const evidenceTokens = tokenizeRelevance(evidenceSurface);
+  if (evidenceTokens.size === 0) return 0;
+
+  let overlap = 0;
+  for (const tok of sectionTokens) {
+    if (evidenceTokens.has(tok)) overlap += 1;
+  }
+
+  const normalizedOverlap = overlap / Math.max(6, Math.min(sectionTokens.size, 22));
+  const headingBoost = normalizeRelevanceText(item.heading).includes(
+    normalizeRelevanceText(item.section_category ?? ""),
+  )
+    ? 0.05
+    : 0;
+  return Math.min(1, normalizedOverlap * 1.6 + headingBoost);
+}
+
+function sanitizeSectionCitations(
+  markdown: string,
+  evidence: ChunkRecord[],
+  threshold = 0.18,
+): {
+  markdown: string;
+  totalCitations: number;
+  relevantCitations: number;
+  filteredCitations: number;
+} {
+  let totalCitations = 0;
+  let relevantCitations = 0;
+  let filteredCitations = 0;
+
+  const sanitized = markdown.replace(EVIDENCE_BLOCK_RE, (match, block) => {
+    const refs = extractEvidenceRefsFromBlock(block, evidence.length);
+    if (!refs.length) return match;
+    totalCitations += refs.length;
+
+    const kept: number[] = [];
+    for (const idx of refs) {
+      const score = scoreCitationRelevance(markdown, evidence[idx - 1]);
+      if (score >= threshold) {
+        kept.push(idx);
+        relevantCitations += 1;
+      } else {
+        filteredCitations += 1;
+      }
+    }
+    if (!kept.length) return "";
+    if (kept.length === 1) return `[E${kept[0]}]`;
+    return `[${kept.map((id) => `E${id}`).join(", ")}]`;
+  });
+
+  return {
+    markdown: sanitized.replace(/\s{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim(),
+    totalCitations,
+    relevantCitations,
+    filteredCitations,
+  };
 }
 
 function normalizeConfidenceKey(value: string): string {
@@ -207,18 +329,14 @@ function deriveAnswerConfidence(
   return Math.round(((sectionAverage * 0.45) + (evidenceScore * 0.35) + (diversityScore * 0.2)) * 1000) / 1000;
 }
 
-function extractUsedEvidenceIds(parsed: DraftAnswer): number[] {
+function extractUsedEvidenceIds(parsed: DraftAnswer, maxEvidence: number): number[] {
   const used = new Set<number>();
   for (const sec of parsed.sections ?? []) {
     const md = sec.markdown ?? "";
-    let m: RegExpExecArray | null;
-    const re = /\[E(\d+)\]/g;
-    while ((m = re.exec(md)) !== null) used.add(parseInt(m[1], 10));
+    for (const idx of extractEvidenceRefsFromText(md, maxEvidence)) used.add(idx);
   }
   const vlog = parsed.verification_log ?? "";
-  let vm: RegExpExecArray | null;
-  const vre = /\[E(\d+)\]/g;
-  while ((vm = vre.exec(vlog)) !== null) used.add(parseInt(vm[1], 10));
+  for (const idx of extractEvidenceRefsFromText(vlog, maxEvidence)) used.add(idx);
   return [...used].sort((a, b) => a - b);
 }
 
@@ -477,8 +595,25 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
     );
   }
 
+  let totalCitationRefs = 0;
+  let relevantCitationRefs = 0;
+  let filteredCitationRefs = 0;
+  const sectionPrecision: Record<string, number> = {};
+
+  for (const sec of parsed.sections ?? []) {
+    if (!sec.markdown) continue;
+    const sanitized = sanitizeSectionCitations(sec.markdown, sortedEvidence);
+    sec.markdown = sanitized.markdown;
+    totalCitationRefs += sanitized.totalCitations;
+    relevantCitationRefs += sanitized.relevantCitations;
+    filteredCitationRefs += sanitized.filteredCitations;
+    if (sanitized.totalCitations > 0) {
+      sectionPrecision[sec.title] = Math.round((sanitized.relevantCitations / sanitized.totalCitations) * 1000) / 1000;
+    }
+  }
+
   // Resolve citations
-  const usedIds = extractUsedEvidenceIds(parsed);
+  const usedIds = extractUsedEvidenceIds(parsed, sortedEvidence.length);
   for (const sec of parsed.sections ?? []) {
     if (sec.markdown) {
       sec.markdown = resolveEvidenceCitations(sec.markdown, sortedEvidence);
@@ -503,6 +638,15 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
   }
   parsed.citations = citations;
   parsed.section_confidence_map = buildSectionConfidenceMap(parsed.sections ?? [], sortedEvidence);
+  parsed.citation_quality = {
+    overall_precision: totalCitationRefs > 0
+      ? Math.round((relevantCitationRefs / totalCitationRefs) * 1000) / 1000
+      : 0,
+    section_precision_map: sectionPrecision,
+    total_citations: totalCitationRefs,
+    relevant_citations: relevantCitationRefs,
+    filtered_citations: filteredCitationRefs,
+  };
 
   // Evidence coverage
   const total = sortedEvidence.length;
