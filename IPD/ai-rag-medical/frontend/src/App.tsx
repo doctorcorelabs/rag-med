@@ -294,6 +294,65 @@ function buildNoteMarkdownFromResponse(response: ApiResponse): string {
   return parts.join('\n').trim() + '\n';
 }
 
+function normalizeInlineTableMarkdown(markdown: string): string {
+  const withSpacedCitations = markdown.replace(/\)\(\(Sumber\)/g, ') ((Sumber)');
+
+  return withSpacedCitations
+    .split('\n')
+    .map((line) => {
+      const leading = (line.match(/^\s*/) || [''])[0];
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      const pipeCount = (trimmed.match(/\|/g) || []).length;
+      if (pipeCount < 6 || !/---/.test(trimmed)) return line;
+
+      const firstPipe = trimmed.indexOf('|');
+      if (firstPipe < 0) return line;
+
+      const prefix = trimmed.slice(0, firstPipe).trim();
+      const tablePart = trimmed.slice(firstPipe).trim();
+
+      let cells = tablePart.split('|').map((cell) => cell.trim());
+      if (cells[0] === '') cells = cells.slice(1);
+      if (cells[cells.length - 1] === '') cells = cells.slice(0, -1);
+      if (cells.length < 6) return line;
+
+      let separatorStart = -1;
+      let separatorLength = 0;
+      for (let index = 0; index < cells.length; index += 1) {
+        if (/^:?-{3,}:?$/.test(cells[index])) {
+          if (separatorStart < 0) separatorStart = index;
+          separatorLength += 1;
+        } else if (separatorStart >= 0) {
+          break;
+        }
+      }
+
+      if (separatorStart <= 0 || separatorLength < 2) return line;
+
+      const columnCount = separatorStart;
+      if (separatorLength !== columnCount) return line;
+
+      const remaining = cells.slice(separatorStart + separatorLength);
+      if (remaining.length === 0 || remaining.length % columnCount !== 0) return line;
+
+      const headerRow = cells.slice(0, columnCount);
+      const separatorRow = cells.slice(separatorStart, separatorStart + separatorLength);
+      const rows: string[][] = [];
+      for (let index = 0; index < remaining.length; index += columnCount) {
+        rows.push(remaining.slice(index, index + columnCount));
+      }
+
+      const formatRow = (row: string[]) => `${leading}| ${row.join(' | ')} |`;
+      const tableLines = [formatRow(headerRow), formatRow(separatorRow), ...rows.map(formatRow)].join('\n');
+
+      if (!prefix) return tableLines;
+      return `${leading}${prefix}\n${tableLines}`;
+    })
+    .join('\n');
+}
+
 // ─── RESPONSIVE HOOKS ───────────────────────────────────────────────────────
 function useScreenSize() {
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
@@ -2658,7 +2717,7 @@ export default function App() {
   // ─── Render section content ──
   const renderSection = (section: DraftSection, sIdx: number, confidence?: number) => {
     const icon = SECTION_ICONS[section.title] || 'article';
-    const content = (section.markdown ?? (section.points?.join('\n\n') ?? '')).trim();
+    const content = normalizeInlineTableMarkdown((section.markdown ?? (section.points?.join('\n\n') ?? '')).trim());
 
     if (!content) return null;
 
