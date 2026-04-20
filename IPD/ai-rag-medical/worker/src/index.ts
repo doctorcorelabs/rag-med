@@ -748,7 +748,7 @@ app.post("/search_disease_context", async (c) => {
   const page = payload.page ?? 1;
 
   // ── Cek list intent sebelum semantic search ────────────────────────
-  if (detectedListingIntent || isExhaustive) {
+  if (detectedListingIntent) {
     // Extract source filter if any (simple keyword matching)
     const sourceKeywords = ["atria", "mediko", "pppk", "p3k", "kaplan"];
     let foundFilter: string | undefined;
