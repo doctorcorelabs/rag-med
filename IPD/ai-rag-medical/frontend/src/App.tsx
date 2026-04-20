@@ -107,7 +107,7 @@ type LibraryPreviewResponse = {
   persisted?: boolean;
 };
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8010';
+const API_URL = import.meta.env.VITE_API_URL || 'https://medrag-worker.daivanfebrijuansetiya.workers.dev';
 const DEFAULT_UPLOAD_MODE: 'legacy' | 'cloud' =
   import.meta.env.VITE_UPLOAD_MODE === 'legacy'
     ? 'legacy'

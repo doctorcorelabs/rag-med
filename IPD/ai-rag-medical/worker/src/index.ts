@@ -12,9 +12,12 @@ import {
   getKnowledgeGraph,
   synthesizeFallback,
   getSupabase,
+  getTopicsFromDb,
+  extractDiseaseListFromChunks,
 } from "./retriever";
 import {
   askCopilotAdaptive,
+  askCopilotForPureList,
   refineMarkdownWithInstruction,
   mergeTwoMarkdownArticles,
   generateMindmapFromArticle,
@@ -740,6 +743,90 @@ app.post("/search_disease_context", async (c) => {
   const det = isDetailRequest(payload.disease_name);
   const detectedListingIntent = isListingIntent(payload.disease_name);
 
+  // Compute pagination metadata
+  const pageSize = payload.page_size ?? 50;
+  const page = payload.page ?? 1;
+
+  // ── Cek list intent sebelum semantic search ────────────────────────
+  if (detectedListingIntent || isExhaustive) {
+    // Extract source filter if any (simple keyword matching)
+    const sourceKeywords = ["atria", "mediko", "pppk", "p3k", "kaplan"];
+    let foundFilter: string | undefined;
+    const qLower = payload.disease_name.toLowerCase();
+    for (const kw of sourceKeywords) {
+      if (qLower.includes(kw)) {
+        foundFilter = kw;
+        break;
+      }
+    }
+
+    const topics = await getTopicsFromDb(c.env, staseSlug, foundFilter);
+
+    // Build simple structured answer for list queries directly from DB
+    const sections: any[] = [];
+    for (const src of (topics.sources as any[]) ?? []) {
+      const topicsMd = (src.topics as any[])
+        .map((t: any, i: number) => `${i + 1}. **${t.heading}**`)
+        .join("\n");
+      sections.push({
+        title: src.source_name,
+        markdown: topicsMd,
+      });
+    }
+
+    let listAnswer: Record<string, any> = {
+      disease: "Daftar Lengkap Topik Knowledge Base",
+      sections: sections,
+      citations: [],
+      grounded: true,
+    };
+
+    // --- AI Refinement (Optional) ---
+    if (c.env.GITHUB_TOKEN) {
+      try {
+        // AI will filter noise (like symbols and page numbers) while maintaining completeness
+        listAnswer = (await askCopilotForPureList(
+          topics,
+          c.env.GITHUB_TOKEN,
+        )) as unknown as Record<string, any>;
+      } catch (e) {
+        console.warn("[WARN] AI list refinement failed, using raw DB list:", e);
+      }
+    }
+
+    return c.json({
+      query: payload.disease_name,
+      query_analysis: {
+        is_list_intent: true,
+        retrieval_mode: mode,
+      },
+      retrieval_mode: mode,
+      detail_level: payload.detail_level,
+      evidence_count: 0,
+      evidence: [],
+      draft_answer: listAnswer,
+      images: [],
+      topics: topics,
+      disease_list: extractDiseaseListFromChunks(
+        topics.sources.flatMap((s: any) =>
+          s.topics.map((t: any) => ({
+            ...t,
+            source_name: s.source_name,
+            page_no: 1, // Fallback as topics don't have page_no directly
+          }))
+        )
+      ),
+      pagination: {
+        page: page,
+        page_size: pageSize,
+        total_found: 0,
+        returned_count: 0,
+        is_truncated: false,
+      },
+      note: "Output disaring menggunakan AI untuk menampilkan hanya entitas penyakit murni.",
+    });
+  }
+
   const evidence = await searchChunks(
     c.env,
     payload.disease_name,
@@ -749,9 +836,6 @@ app.post("/search_disease_context", async (c) => {
     mode,
   );
 
-  // Compute pagination metadata
-  const pageSize = payload.page_size ?? 50;
-  const page = payload.page ?? 1;
   const maxItems = payload.max_items ?? null;
   const totalCandidates = evidence.length;
 

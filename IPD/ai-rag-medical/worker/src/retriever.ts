@@ -408,6 +408,144 @@ export async function getKnowledgeGraph(
 // Helper: synthesize fallback (no AI token)
 // ─────────────────────────────────────────────────────────────────────────────
 
+export async function getTopicsFromDb(
+  env: Env,
+  staseSlug?: string,
+  sourceFilter?: string,
+): Promise<any> {
+  const supabase = getSupabase(env);
+
+  const HEADING_NOISE = [
+    "definisi", "etiologi", "patofisiologi", "patogenesis",
+    "manifestasi klinis", "diagnosis", "tatalaksana", "tata laksana",
+    "komplikasi", "prognosis", "pemeriksaan fisik", "pemeriksaan penunjang",
+    "anamnesis", "faktor risiko", "diagnosis banding", "ringkasan",
+    "daftar isi", "pendahuluan", "referensi", "daftar pustaka",
+    "image from page folder", "general",
+  ];
+
+  let query = supabase
+    .from("chunks")
+    .select("source_name, heading, section_category, stase_slug")
+    .not("heading", "in", `(${HEADING_NOISE.map((h) => `"${h}"`).join(",")})`);
+
+  if (staseSlug) {
+    query = query.eq("stase_slug", staseSlug);
+  }
+  if (sourceFilter) {
+    query = query.ilike("source_name", `%${sourceFilter}%`);
+  }
+
+  // Supabase doesn't support SELECT DISTINCT directly via JS client in a clean way for multiple cols
+  // without RPC. If RPC is not available, we can deduplicate in JS.
+  const { data, error } = await query.order("source_name").order("heading");
+
+  if (error || !data) return { sources: [], total_topics: 0, source_count: 0 };
+
+  const grouped: Record<string, any> = {};
+  for (const r of data as any[]) {
+    const h = (r.heading || "").trim();
+    // Filter noise: ignore very short headings, single digits, or pure symbols
+    if (h.length <= 2 || /^\d+$/.test(h) || /^[^a-zA-Z0-9]+$/.test(h)) {
+      continue;
+    }
+
+    const src = r.source_name;
+    if (!grouped[src]) {
+      grouped[src] = {
+        source_name: src,
+        stase_slug: r.stase_slug,
+        topics: [],
+      };
+    }
+    // Dedup heading per source
+    const existing = new Set(grouped[src].topics.map((t: any) => t.heading));
+    if (!existing.has(h)) {
+      grouped[src].topics.push({
+        heading: h,
+        section_category: r.section_category,
+      });
+    }
+  }
+
+  const sources = Object.values(grouped);
+  let totalTopics = 0;
+  for (const s of sources as any[]) {
+    s.topic_count = s.topics.length;
+    totalTopics += s.topic_count;
+  }
+
+  return {
+    sources,
+    total_topics: totalTopics,
+    source_count: sources.length,
+  };
+}
+
+export function extractDiseaseListFromChunks(chunks: ChunkRecord[]): any[] {
+  const GENERIC_HEADINGS = new Set([
+    "patofisiologi", "patogenesis", "definisi", "etiologi", "tatalaksana",
+    "tata laksana", "manifestasi klinis", "manifestasi", "diagnosis",
+    "komplikasi", "prognosis", "general", "pemeriksaan fisik",
+    "pemeriksaan penunjang", "anamnesis", "faktor risiko", "etiologi dan faktor risiko",
+    "komplikasi dan prognosis", "ringkasan klinis", "penunjang", "farmakologi",
+    "image from page folder",
+  ]);
+
+  const seen = new Map<string, any>();
+
+  for (const chunk of chunks) {
+    const evidenceItem = {
+      source_name: chunk.source_name,
+      page_no: chunk.page_no,
+      heading: chunk.heading,
+    };
+
+    const candidates: string[] = [];
+
+    // 1. disease_tags
+    if (chunk.disease_tags) {
+      const tags = chunk.disease_tags.split(/[,;|]/);
+      for (const tag of tags) {
+        const t = tag.trim();
+        if (t) candidates.push(t);
+      }
+    }
+
+    // 2. heading (exclude generic clinical names)
+    const heading = (chunk.heading || "").trim();
+    if (heading && !GENERIC_HEADINGS.has(heading.toLowerCase().replace(/:$/, ""))) {
+      candidates.push(heading);
+    }
+
+    // 3. source_name as fallback
+    if (candidates.length === 0 && chunk.source_name) {
+      candidates.push(chunk.source_name);
+    }
+
+    for (const cand of candidates) {
+      const norm = cand.toLowerCase().trim();
+      if (!norm || norm.length < 3) continue;
+
+      if (seen.has(norm)) {
+        const entry = seen.get(norm);
+        const evKey = `${evidenceItem.source_name}:${evidenceItem.page_no}`;
+        const existingKeys = new Set(entry.evidence.map((e: any) => `${e.source_name}:${e.page_no}`));
+        if (!existingKeys.has(evKey)) {
+          entry.evidence.push(evidenceItem);
+        }
+      } else {
+        seen.set(norm, {
+          name: cand,
+          evidence: [evidenceItem],
+        });
+      }
+    }
+  }
+
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function synthesizeFallback(
   query: string,
   evidence: ChunkRecord[],

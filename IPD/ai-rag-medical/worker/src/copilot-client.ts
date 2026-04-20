@@ -703,6 +703,58 @@ FORMAT OUTPUT (RAW JSON VALID, TANPA markdown code block):
   }
 }
 
+export async function askCopilotForPureList(
+  topicsData: Record<string, any>,
+  githubToken: string,
+): Promise<DraftAnswer> {
+  if (!githubToken) throw new Error("GITHUB_TOKEN is missing");
+
+  const copilotToken = await getCopilotToken(githubToken);
+
+  // Prepare raw list as string for LLM
+  let rawList = "";
+  for (const src of (topicsData.sources as any[]) ?? []) {
+    rawList += `\nSOURCE: ${src.source_name}\n`;
+    for (const t of (src.topics as any[]) ?? []) {
+      rawList += `- ${t.heading}\n`;
+    }
+  }
+
+  const systemPrompt = `Anda adalah ahli rekam medis. Tugas Anda adalah MEMBERSIHKAN daftar topik medis.
+ATURAN KETAT:
+1. Hanya simpan item yang merupakan NAMA PENYAKIT, KONDISI KLINIS, atau TOPIK MEDIS UTAMA.
+2. HAPUS: angka saja, simbol (#, $, dll), judul bab umum (Pendahuluan, Daftar Isi, Lampiran), atau instruksi (misal: '1 Jam Pasca...').
+3. JANGAN meringkas daftar. Tampilkan SEMUA yang valid.
+4. Output harus JSON valid sesuai format.
+
+FORMAT OUTPUT:
+{
+  "disease": "Daftar Murni Penyakit & Kondisi Medis",
+  "sections": [
+    {
+      "title": "Nama Sumber",
+      "markdown": "1. **Nama Penyakit A**\\n2. **Nama Penyakit B**..."
+    }
+  ],
+  "citations": []
+}`;
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: `Saring daftar mentah berikut menjadi murni nama penyakit:\n${rawList}` },
+  ];
+
+  try {
+    const raw = await callCopilot(copilotToken, messages);
+    const result = parseJsonResponse(raw);
+    result.grounded = true;
+    return result;
+  } catch (e) {
+    console.error("[askCopilotForPureList] error:", e);
+    throw e;
+  }
+}
+
 function stripMarkdownFence(text: string): string {
   let t = text.trim();
   if (t.startsWith("```")) {
