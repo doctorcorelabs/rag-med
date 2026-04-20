@@ -2,7 +2,7 @@
 // Replaces: retriever.py (search_chunks, related_images, get_knowledge_graph)
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import type { Env, ChunkRecord, ImageRecord } from "./types";
+import type { Env, ChunkRecord, ImageRecord, DiseaseResolutionInfo } from "./types";
 import { WORKERS_EMBEDDING_MODEL } from "./indexer";
 import {
   extractDiseaseName,
@@ -16,6 +16,9 @@ import {
   DISEASE_KEYWORDS,
   CLINICAL_ORDER,
   resolveRetrievalMode,
+  normalizeMedicalTerm,
+  scoreMedicalTermSimilarity,
+  collectMedicalAliasCandidates,
 } from "./medical-vocab";
 
 export function getSupabase(env: Env): SupabaseClient {
@@ -25,8 +28,174 @@ export function getSupabase(env: Env): SupabaseClient {
 }
 
 // ── Retrieval mode constants ──────────────────────────────────────────────────
+const DEFAULT_TOP_K_RELEVANT = 8;
 const DEFAULT_TOP_K_EXHAUSTIVE = 80;
 const MAX_TOP_K_EXHAUSTIVE = 200;
+const MIN_FILTERED_RESULTS = 2;
+const DYNAMIC_LEXICON_CACHE_TTL_MS = 30 * 60 * 1000;
+const DYNAMIC_LEXICON_MAX_ROWS = 2500;
+const DETAIL_FILLER_WORDS_RE = /\b(jelaskan|jelasin|menjelaskan|secara|detail|lengkap|komprehensif|selengkap|keseluruhan|tentang|apa itu)\b/gi;
+
+type LexiconCacheEntry = {
+  loadedAt: number;
+  terms: string[];
+};
+
+const dynamicLexiconCache = new Map<string, LexiconCacheEntry>();
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+async function loadDynamicDiseaseLexicon(
+  env: Env,
+  staseSlug?: string,
+): Promise<string[]> {
+  const cacheKey = staseSlug ?? "__all__";
+  const cached = dynamicLexiconCache.get(cacheKey);
+  if (cached && Date.now() - cached.loadedAt < DYNAMIC_LEXICON_CACHE_TTL_MS) {
+    return cached.terms;
+  }
+
+  const supabase = getSupabase(env);
+  let query = supabase
+    .from("chunks")
+    .select("heading,disease_tags,source_name,section_category")
+    .order("source_name")
+    .order("page_no");
+
+  if (staseSlug) query = query.eq("stase_slug", staseSlug);
+
+  const { data, error } = await query.limit(DYNAMIC_LEXICON_MAX_ROWS);
+  if (error || !data) {
+    return [];
+  }
+
+  const terms = new Set<string>();
+  for (const row of data as Array<Record<string, unknown>>) {
+    const heading = normalizeMedicalTerm(String(row.heading ?? ""));
+    const diseaseTags = String(row.disease_tags ?? "");
+    const sourceName = normalizeMedicalTerm(String(row.source_name ?? ""));
+    const sectionCategory = normalizeMedicalTerm(String(row.section_category ?? ""));
+
+    if (heading && heading.length > 3) terms.add(heading);
+    if (sourceName && sourceName.length > 3) terms.add(sourceName);
+    if (sectionCategory && sectionCategory.length > 3) terms.add(sectionCategory);
+
+    for (const tag of diseaseTags.split(/[,;|]/)) {
+      const normalized = normalizeMedicalTerm(tag);
+      if (normalized && normalized.length > 3) terms.add(normalized);
+    }
+  }
+
+  const result = [...terms];
+  dynamicLexiconCache.set(cacheKey, { loadedAt: Date.now(), terms: result });
+  return result;
+}
+
+async function resolveDiseaseFromLexicon(
+  env: Env,
+  query: string,
+  staseSlug?: string,
+  fallbackDisease?: string | null,
+): Promise<DiseaseResolutionInfo> {
+  const exact = extractDiseaseName(query);
+  if (exact) {
+    return { disease: exact, method: "exact", confidence: 1, candidates: [exact] };
+  }
+
+  const historicalCandidates = collectMedicalAliasCandidates(query);
+  const dynamicLexicon = await loadDynamicDiseaseLexicon(env, staseSlug);
+  const rawCandidates = [...new Set([
+    ...(fallbackDisease ? [fallbackDisease] : []),
+    ...historicalCandidates,
+    ...dynamicLexicon,
+  ])].filter((term) => term.length > 2);
+
+  if (rawCandidates.length === 0) {
+    return { disease: null, method: "fallback", confidence: 0, candidates: [] };
+  }
+
+  const lexicalRanked = rawCandidates
+    .map((candidate) => ({
+      candidate,
+      lexical: Math.max(
+        scoreMedicalTermSimilarity(query, candidate),
+        scoreMedicalTermSimilarity(fallbackDisease ?? "", candidate),
+      ),
+    }))
+    .sort((a, b) => b.lexical - a.lexical)
+    .slice(0, 20);
+
+  let best = lexicalRanked[0] ?? null;
+  let bestMethod: DiseaseResolutionInfo["method"] = "synonym";
+  let bestConfidence = best?.lexical ?? 0;
+
+  if (lexicalRanked.length > 0) {
+    try {
+      const embeddingInputs = [query, ...lexicalRanked.map((item) => item.candidate)];
+      const embeddingResult = await env.AI.run(WORKERS_EMBEDDING_MODEL, {
+        text: embeddingInputs,
+      }) as unknown as { data: number[][] };
+      const embeddings = embeddingResult.data ?? [];
+      const queryEmbedding = embeddings[0] ?? [];
+      let topScore = -1;
+
+      lexicalRanked.forEach((item, index) => {
+        const candidateEmbedding = embeddings[index + 1] ?? [];
+        const embedScore = cosineSimilarity(queryEmbedding, candidateEmbedding);
+        const combined = (item.lexical * 0.45) + (embedScore * 0.55);
+        if (combined > topScore) {
+          topScore = combined;
+          best = item;
+          bestConfidence = combined;
+          bestMethod = embedScore > 0.35 ? "embedding" : "synonym";
+        }
+      });
+    } catch (e) {
+      console.warn("[resolveDiseaseFromLexicon] embedding fallback failed:", e);
+    }
+  }
+
+  if (!best || bestConfidence < 0.28) {
+    return {
+      disease: fallbackDisease ?? null,
+      method: fallbackDisease ? "history" : "fallback",
+      confidence: Math.max(bestConfidence, fallbackDisease ? 0.2 : 0),
+      candidates: lexicalRanked.slice(0, 5).map((item) => item.candidate),
+    };
+  }
+
+  return {
+    disease: best.candidate,
+    method: bestMethod,
+    confidence: Math.min(1, bestConfidence),
+    candidates: lexicalRanked.slice(0, 5).map((item) => item.candidate),
+  };
+}
+
+function normalizeDetailBaseQuery(query: string): string {
+  const normalized = query
+    .replace(DETAIL_FILLER_WORDS_RE, " ")
+    .replace(/[^\w\s/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) return query;
+
+  const tokens = normalized.split(" ").filter((t) => t.length > 2);
+  return tokens.length > 0 ? tokens.join(" ") : normalized;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core search: Hybrid BM25 (PostgreSQL FTS) + Vector (pgvector via Workers AI)
@@ -127,7 +296,9 @@ function filterByDiseaseRelevance(
   synonyms.forEach((s) => acceptable.add(s.toLowerCase()));
 
   const otherDiseases = new Set(
-    DISEASE_KEYWORDS.map((k) => k.toLowerCase()).filter((k) => !acceptable.has(k)),
+    DISEASE_KEYWORDS
+      .map((k) => k.toLowerCase())
+      .filter((k) => !acceptable.has(k) && k.length > 4),
   );
 
   const GENERIC_HEADINGS = new Set([
@@ -135,10 +306,11 @@ function filterByDiseaseRelevance(
     "tatalaksana", "tata laksana", "manifestasi klinis",
     "diagnosis", "komplikasi", "prognosis", "general",
     "pemeriksaan fisik", "pemeriksaan penunjang",
-    "anamnesis", "faktor risiko",
+    "anamnesis", "faktor risiko", "alur diagnosis",
+    "klasifikasi", "epidemiologi", "ringkasan klinis",
   ]);
 
-  return results.filter((item) => {
+  const filtered = results.filter((item) => {
     const headingLower = item.heading.toLowerCase();
     const contentLower = item.content.toLowerCase().slice(0, 400);
     const combined = `${headingLower} ${contentLower}`;
@@ -154,11 +326,84 @@ function filterByDiseaseRelevance(
     if (headingIsGeneric && !mentionsTarget) return false;
     return true;
   });
+
+  // Avoid empty or nearly-empty output when keyword gates are too strict.
+  return filtered.length >= MIN_FILTERED_RESULTS ? filtered : results;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public: searchChunks — full hybrid RAG pipeline
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function runHybridRetrievalPass(
+  env: Env,
+  supabase: SupabaseClient,
+  query: string,
+  topK: number,
+  staseSlug: string | undefined,
+  isExhaustive: boolean,
+  resolvedDisease: string | null,
+): Promise<ChunkRecord[]> {
+  const enrichedQuery = query;
+  const isDetail = isDetailRequest(enrichedQuery);
+  const intent = extractTopicIntent(enrichedQuery);
+
+  let effectiveTopK: number;
+  if (isExhaustive) {
+    effectiveTopK = Math.min(Math.max(topK, DEFAULT_TOP_K_EXHAUSTIVE), MAX_TOP_K_EXHAUSTIVE);
+  } else if (isDetail) {
+    effectiveTopK = Math.max(topK * 2, 16);
+  } else if (!resolvedDisease && !intent) {
+    effectiveTopK = Math.max(topK, Math.max(DEFAULT_TOP_K_RELEVANT, 12));
+  } else {
+    effectiveTopK = topK;
+  }
+
+  let queriesToRun: string[];
+  if (isExhaustive) {
+    queriesToRun = [enrichedQuery];
+  } else if (isDetail || (resolvedDisease && !intent)) {
+    const base = resolvedDisease ?? normalizeDetailBaseQuery(enrichedQuery);
+    queriesToRun = [
+      `${base} definisi etiologi patogenesis`,
+      `${base} anamnesis gejala klinis pemeriksaan fisik`,
+      `${base} diagnosis tatalaksana dosis obat algoritma`,
+      `${base} komplikasi prognosis`,
+    ];
+  } else {
+    queriesToRun = [enrichedQuery];
+  }
+
+  const [bm25Results, vectorResults] = await Promise.all([
+    Promise.all(queriesToRun.map((q) => ftsSearch(supabase, q, effectiveTopK, staseSlug))).then((r) =>
+      r.flat(),
+    ),
+    Promise.all(
+      queriesToRun.map((q) => vectorSearch(supabase, env, q, effectiveTopK, undefined, staseSlug)),
+    ).then((r) => r.flat()),
+  ]);
+
+  const merged =
+    vectorResults.length > 0
+      ? reciprocalRankFusion(
+          bm25Results as unknown as Record<string, unknown>[],
+          vectorResults as unknown as Record<string, unknown>[],
+        )
+      : bm25Results;
+
+  const seen = new Set<number>();
+  const deduped = (merged as ChunkRecord[]).filter((r) => {
+    if (!r.id || seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  });
+
+  const filtered = isExhaustive ? deduped : filterByDiseaseRelevance(deduped, resolvedDisease);
+  const pruneThreshold = isExhaustive ? 0.85 : 0.6;
+  const pruned = pruneRedundantChunks(filtered, pruneThreshold);
+  const sorted = hierarchicalSort(pruned, intent, effectiveTopK * queriesToRun.length);
+  return sorted.slice(0, effectiveTopK * queriesToRun.length);
+}
 
 export async function searchChunks(
   env: Env,
@@ -173,71 +418,52 @@ export async function searchChunks(
   const isExhaustive = mode === "exhaustive";
 
   const enrichedQuery = enrichQueryFromHistory(query, chatHistory);
-  const detectedDisease = extractDiseaseName(enrichedQuery);
-  const isDetail = isDetailRequest(enrichedQuery);
-  const intent = extractTopicIntent(enrichedQuery);
+  const primaryResolution = await resolveDiseaseFromLexicon(env, enrichedQuery, staseSlug);
+  const primaryPass = await runHybridRetrievalPass(
+    env,
+    supabase,
+    enrichedQuery,
+    topK,
+    staseSlug,
+    isExhaustive,
+    primaryResolution.disease,
+  );
 
-  // Adaptive top_k — exhaustive mode takes precedence
-  let effectiveTopK: number;
   if (isExhaustive) {
-    effectiveTopK = Math.min(Math.max(topK, DEFAULT_TOP_K_EXHAUSTIVE), MAX_TOP_K_EXHAUSTIVE);
-  } else if (isDetail) {
-    effectiveTopK = Math.max(topK * 2, 16);
-  } else {
-    effectiveTopK = topK;
+    return primaryPass;
   }
 
-  // Build sub-queries (multi-query decomposition)
-  // In exhaustive mode, run a single broad query to maximise coverage.
-  let queriesToRun: string[];
-  if (isExhaustive) {
-    queriesToRun = [enrichedQuery];
-  } else if (isDetail || (detectedDisease && !intent)) {
-    const base = detectedDisease ?? enrichedQuery;
-    queriesToRun = [
-      `${base} definisi etiologi patogenesis`,
-      `${base} anamnesis gejala klinis pemeriksaan fisik`,
-      `${base} diagnosis tatalaksana dosis obat algoritma`,
-      `${base} komplikasi prognosis`,
-    ];
-  } else {
-    queriesToRun = [enrichedQuery];
+  const shouldRetry =
+    primaryPass.length < MIN_FILTERED_RESULTS ||
+    primaryResolution.confidence < 0.35 ||
+    (!primaryResolution.disease && isDetailRequest(enrichedQuery));
+
+  if (!shouldRetry) {
+    return primaryPass;
   }
 
-  // Execute all sub-queries in parallel (with stase filter)
-  const [bm25Results, vectorResults] = await Promise.all([
-    Promise.all(queriesToRun.map((q) => ftsSearch(supabase, q, effectiveTopK, staseSlug))).then((r) =>
-      r.flat(),
-    ),
-    Promise.all(
-      queriesToRun.map((q) => vectorSearch(supabase, env, q, effectiveTopK, undefined, staseSlug)),
-    ).then((r) => r.flat()),
-  ]);
+  const retryBase = primaryResolution.disease ?? normalizeDetailBaseQuery(enrichedQuery);
+  const retryQuery = `${retryBase} definisi etiologi patogenesis diagnosis tatalaksana komplikasi prognosis`;
+  const retryResolution = await resolveDiseaseFromLexicon(env, retryQuery, staseSlug, primaryResolution.disease);
+  const retryPass = await runHybridRetrievalPass(
+    env,
+    supabase,
+    retryQuery,
+    Math.min(Math.max(topK + 4, 12), 20),
+    staseSlug,
+    false,
+    retryResolution.disease ?? primaryResolution.disease,
+  );
 
-  // Hybrid fusion
-  const merged =
-    vectorResults.length > 0
-      ? reciprocalRankFusion(bm25Results as unknown as Record<string, unknown>[], vectorResults as unknown as Record<string, unknown>[])
-      : bm25Results;
-
-  // Deduplicate → disease filter → prune redundant → hierarchical sort
-  const seen = new Set<number>();
-  const deduped = (merged as ChunkRecord[]).filter((r) => {
-    if (!r.id || seen.has(r.id)) return false;
-    seen.add(r.id);
+  const merged = [...primaryPass, ...retryPass];
+  const seenIds = new Set<number>();
+  const deduped = merged.filter((item) => {
+    if (!item.id || seenIds.has(item.id)) return false;
+    seenIds.add(item.id);
     return true;
   });
 
-  // Disease relevance gating — skip in exhaustive mode to preserve full coverage
-  const filtered = isExhaustive ? deduped : filterByDiseaseRelevance(deduped, detectedDisease);
-
-  // Use a looser Jaccard threshold in exhaustive mode to avoid discarding
-  // legitimately distinct chunks from a broad catalog search.
-  const pruneThreshold = isExhaustive ? 0.85 : 0.6;
-  const pruned = pruneRedundantChunks(filtered, pruneThreshold);
-  const sorted = hierarchicalSort(pruned, intent, effectiveTopK * queriesToRun.length);
-
-  return sorted.slice(0, effectiveTopK * queriesToRun.length);
+  return deduped.length > primaryPass.length ? deduped : primaryPass;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,12 +794,27 @@ export function synthesizeFallback(
     markdown: contents.join("\n\n"),
   }));
 
-  const citations = [...new Set(sorted.map((c) => `${c.source_name} p.${c.page_no}`))];
+  if (sections.length === 0) {
+    sections.push({
+      title: "Ringkasan",
+      markdown:
+        "Belum ada evidence yang cukup untuk menyusun penjelasan detail. Perjelas nama penyakit atau topik klinis spesifik untuk meningkatkan akurasi retrieval.",
+    });
+  }
+
+  const citations = [...new Set(
+    sorted.map((c) => `${c.source_name} p.${c.page_no > 0 ? c.page_no : "?"}`),
+  )];
 
   return {
     disease: query,
     sections,
     citations,
     grounded: true,
+    answer_confidence: Math.max(0.15, Math.min(0.6, sorted.length > 0 ? 0.35 + (sorted.length / 20) : 0.15)),
+    section_confidence_map: Object.fromEntries(
+      sections.map((section) => [section.title, sorted.length > 0 ? 0.5 : 0.2]),
+    ),
+    retrieval_passes: 1,
   };
 }

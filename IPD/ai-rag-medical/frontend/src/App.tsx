@@ -2016,7 +2016,7 @@ function CollapsibleSection({ title, children, icon }: { title: string; children
       <div 
         ref={contentRef}
         className={`relative transition-all duration-500 ease-in-out overflow-hidden ${
-          shouldCollapse && !isExpanded ? 'max-h-[400px]' : 'max-h-[none]'
+          shouldCollapse && !isExpanded ? 'max-h-100' : 'max-h-none'
         }`}
       >
         <div className="prose-slate dark:prose-invert text-on-surface text-base leading-relaxed pl-1">

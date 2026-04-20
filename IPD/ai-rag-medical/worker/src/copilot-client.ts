@@ -133,14 +133,76 @@ function resolveEvidenceCitations(
   text: string,
   evidence: ChunkRecord[],
 ): string {
-  return text.replace(EVIDENCE_REF_RE, (_match, numStr) => {
+  const resolved = text.replace(EVIDENCE_REF_RE, (_match, numStr) => {
     const idx = parseInt(numStr, 10);
     if (idx >= 1 && idx <= evidence.length) {
       const item = evidence[idx - 1];
       return `(${item.source_name}, Hal ${item.page_no})`;
     }
-    return _match;
+    return "";
   });
+
+  // Clean up unresolved singleton [E#] references so user output stays readable.
+  return resolved.replace(EVIDENCE_REF_RE, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function normalizeConfidenceKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_:.,()\[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scoreSectionConfidence(sectionTitle: string, evidence: ChunkRecord[]): number {
+  const normalizedTitle = normalizeConfidenceKey(sectionTitle);
+  if (!normalizedTitle) return 0.25;
+
+  const matchingEvidence = evidence.filter((item) => {
+    const category = normalizeConfidenceKey(item.section_category ?? "");
+    const heading = normalizeConfidenceKey(item.heading ?? "");
+    const content = normalizeConfidenceKey((item.content ?? "").slice(0, 200));
+    return (
+      category === normalizedTitle ||
+      category.includes(normalizedTitle) ||
+      normalizedTitle.includes(category) ||
+      heading.includes(normalizedTitle) ||
+      content.includes(normalizedTitle)
+    );
+  });
+
+  if (matchingEvidence.length === 0) return 0.28;
+
+  const sourceCount = new Set(matchingEvidence.map((item) => item.source_name)).size;
+  const pageCount = new Set(matchingEvidence.map((item) => `${item.source_name}:${item.page_no}`)).size;
+  const diversityScore = Math.min(1, sourceCount / 2);
+  const coverageScore = Math.min(1, pageCount / 3);
+  return Math.min(1, 0.35 + (diversityScore * 0.35) + (coverageScore * 0.3));
+}
+
+function buildSectionConfidenceMap(
+  sections: DraftAnswer["sections"],
+  evidence: ChunkRecord[],
+): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const section of sections ?? []) {
+    map[section.title] = Math.round(scoreSectionConfidence(section.title, evidence) * 1000) / 1000;
+  }
+  return map;
+}
+
+function deriveAnswerConfidence(
+  parsed: DraftAnswer,
+  evidence: ChunkRecord[],
+): number {
+  const coverage = parsed.evidence_coverage?.coverage_percent ?? 0;
+  const sectionScores = Object.values(parsed.section_confidence_map ?? {});
+  const sectionAverage = sectionScores.length > 0
+    ? sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length
+    : 0.3;
+  const evidenceScore = Math.min(1, coverage / 100);
+  const diversityScore = Math.min(1, new Set(evidence.map((item) => item.source_name)).size / 3);
+  return Math.round(((sectionAverage * 0.45) + (evidenceScore * 0.35) + (diversityScore * 0.2)) * 1000) / 1000;
 }
 
 function extractUsedEvidenceIds(parsed: DraftAnswer): number[] {
@@ -243,6 +305,8 @@ FORMAT OUTPUT (RAW JSON VALID, TANPA markdown code block):
 {
   "verification_log": "Catatan verifikasi: Evidence yang digunakan: [E1], [E2], ... Evidence tidak relevan: [EN] karena ...",
   "disease": "Nama Penyakit/Kondisi",
+  "answer_confidence": 0.0,
+  "section_confidence_map": {"Definisi": 0.0},
   "sections": [
     {
       "title": "Judul Section",
@@ -424,6 +488,7 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
     }
   }
   parsed.citations = citations;
+  parsed.section_confidence_map = buildSectionConfidenceMap(parsed.sections ?? [], sortedEvidence);
 
   // Evidence coverage
   const total = sortedEvidence.length;
@@ -436,6 +501,7 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
     unused_evidence: unusedIds,
     coverage_percent: total > 0 ? Math.round((usedIds.length / total) * 1000) / 10 : 0,
   };
+  parsed.answer_confidence = deriveAnswerConfidence(parsed, sortedEvidence);
   parsed.grounded = true;
 
   return parsed;
@@ -559,6 +625,28 @@ export async function askCopilotAdaptive(
 ): Promise<DraftAnswer> {
   if (!githubToken) throw new Error("GITHUB_TOKEN is missing");
 
+  if (evidence.length === 0) {
+    return {
+      disease: diseaseName,
+      sections: [
+        {
+          title: "Ringkasan",
+          markdown: "Data referensi untuk pertanyaan ini belum cukup. Coba tambahkan nama penyakit yang lebih spesifik atau topik klinis (misalnya diagnosis/tatalaksana).",
+        },
+      ],
+      citations: [],
+      grounded: true,
+      answer_confidence: 0.1,
+      section_confidence_map: { Ringkasan: 0.1 },
+      evidence_coverage: {
+        total_evidence: 0,
+        used_evidence: [],
+        unused_evidence: [],
+        coverage_percent: 0,
+      },
+    };
+  }
+
   const copilotToken = await getCopilotToken(githubToken);
   const [contextText, sortedEvidence] = formatEvidenceStructured(evidence);
   const intentCategory = extractTopicIntent(diseaseName);
@@ -588,6 +676,8 @@ export async function askCopilotAdaptive(
       sections: [{ title: "AI Processing Error", markdown: `Terjadi kesalahan: \`${e}\`` }],
       citations: evidence.slice(0, 5).map((i) => `${i.source_name} p.${i.page_no}`),
       grounded: false,
+      answer_confidence: 0.05,
+      section_confidence_map: { "AI Processing Error": 0.05 },
     };
   }
 }

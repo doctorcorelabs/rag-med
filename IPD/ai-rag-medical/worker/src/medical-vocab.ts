@@ -9,6 +9,10 @@ export const MEDICAL_SYNONYMS: Record<string, string[]> = {
   copd: ["ppok", "penyakit paru obstruktif kronis"],
   asma: ["asthma", "bengek", "mengi"],
   pneumonia: ["paru-paru basah", "bronkopneumonia", "cap", "hap", "vap"],
+  "sindrom mendelson": ["mendelson syndrome", "mendelson", "aspiration pneumonitis", "pneumonitis aspirasi"],
+  mendelson: ["sindrom mendelson", "mendelson syndrome", "aspiration pneumonitis", "pneumonitis aspirasi"],
+  "aspiration pneumonitis": ["sindrom mendelson", "mendelson syndrome", "mendelson", "pneumonitis aspirasi"],
+  "pneumonitis aspirasi": ["sindrom mendelson", "mendelson syndrome", "mendelson", "aspiration pneumonitis"],
   ards: ["acute respiratory distress syndrome", "gagal napas akut"],
   // Cardio
   acs: ["sindrom koroner akut", "ska", "serangan jantung", "stemi", "nstemi", "infark miokard"],
@@ -119,6 +123,7 @@ export const INTENT_MAP: Record<string, string> = {
 
 export const DISEASE_KEYWORDS: string[] = [
   "tuberkulosis", "tbc", "tb", "pneumonia", "asma", "copd", "ppok",
+  "sindrom mendelson", "mendelson syndrome", "mendelson", "aspiration pneumonitis", "pneumonitis aspirasi",
   "bronkitis", "bronkiolitis", "bronkiektasis", "emboli", "abses",
   "efusi pleura", "pneumotoraks", "atelektasis", "fibrosis",
   "kanker paru", "mesotelioma", "sarkoidosis", "hemoptisis",
@@ -278,6 +283,60 @@ export function getExpandedTerms(query: string): string[] {
   const tokens = (query.match(TOKEN_RE) ?? []).filter((t) => t.length > 2);
   const corrected = tokens.map(correctTypo);
   return expandSynonyms(corrected);
+}
+
+export function normalizeMedicalTerm(term: string): string {
+  return term
+    .toLowerCase()
+    .replace(/[_:.,()\[\]{}]/g, " ")
+    .replace(/[^a-z0-9/\-\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function scoreMedicalTermSimilarity(query: string, candidate: string): number {
+  const queryNorm = normalizeMedicalTerm(query);
+  const candidateNorm = normalizeMedicalTerm(candidate);
+  if (!queryNorm || !candidateNorm) return 0;
+
+  if (queryNorm === candidateNorm) return 1;
+  if (queryNorm.includes(candidateNorm) || candidateNorm.includes(queryNorm)) {
+    return 0.92;
+  }
+
+  const queryTokens = new Set(queryNorm.split(/\s+/).filter((t) => t.length > 2));
+  const candidateTokens = new Set(candidateNorm.split(/\s+/).filter((t) => t.length > 2));
+  if (queryTokens.size === 0 || candidateTokens.size === 0) return 0;
+
+  let overlap = 0;
+  for (const token of queryTokens) {
+    if (candidateTokens.has(token)) overlap++;
+  }
+
+  const union = queryTokens.size + candidateTokens.size - overlap;
+  const jaccard = union > 0 ? overlap / union : 0;
+  const prefixBoost = queryNorm.startsWith(candidateNorm.slice(0, 8)) || candidateNorm.startsWith(queryNorm.slice(0, 8)) ? 0.08 : 0;
+  return Math.min(1, jaccard * 0.85 + prefixBoost);
+}
+
+export function collectMedicalAliasCandidates(query: string): string[] {
+  const expanded = new Set<string>();
+  expanded.add(normalizeMedicalTerm(query));
+
+  for (const term of getExpandedTerms(query)) {
+    expanded.add(normalizeMedicalTerm(term));
+  }
+
+  for (const token of (query.match(TOKEN_RE) ?? []).filter((t) => t.length > 2)) {
+    const corrected = correctTypo(token);
+    expanded.add(normalizeMedicalTerm(corrected));
+    const synonyms = MEDICAL_SYNONYMS[corrected.toLowerCase()] ?? MEDICAL_SYNONYMS[token.toLowerCase()] ?? [];
+    for (const synonym of synonyms) {
+      expanded.add(normalizeMedicalTerm(synonym));
+    }
+  }
+
+  return [...expanded].filter((term) => term.length > 2);
 }
 
 // Jaccard similarity for dedup

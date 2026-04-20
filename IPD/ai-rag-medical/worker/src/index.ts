@@ -199,6 +199,7 @@ const LibraryUpdateVisualRefsSchema = z.object({
 });
 
 type LibraryVisualRefItemIn = z.infer<typeof LibraryVisualRefItemSchema>;
+const MIN_EVIDENCE_FOR_AI = 3;
 
 /** At least one of path/ref/URL so non-local R2 images can be persisted (parity with FastAPI meta.images). */
 function normalizeLibraryVisualRefItem(img: LibraryVisualRefItemIn): Record<string, unknown> | null {
@@ -217,6 +218,64 @@ function normalizeLibraryVisualRefItem(img: LibraryVisualRefItemIn): Record<stri
   if (s) out.storage_url = s;
   if (u) out.image_url = u;
   return out;
+}
+
+function isLikelyMedicalTopic(text: string): boolean {
+  const clean = text.trim();
+  if (!clean || clean.length < 3) return false;
+  if (/^\d+$/.test(clean)) return false;
+  if (/^[^a-zA-Z]+$/.test(clean)) return false;
+  const lowered = clean.toLowerCase();
+  const blocked = ["pendahuluan", "daftar isi", "lampiran", "kata pengantar", "bab ", "chapter "];
+  return !blocked.some((kw) => lowered.includes(kw));
+}
+
+function buildPureListFallback(topicsData: Record<string, any>): Record<string, unknown> {
+  const sections: Array<{ title: string; markdown: string }> = [];
+
+  for (const src of (topicsData.sources as any[]) ?? []) {
+    const cleaned = ((src.topics as any[]) ?? [])
+      .map((t: any) => (t.heading ?? "").toString().trim())
+      .filter((heading: string) => isLikelyMedicalTopic(heading));
+
+    const unique = [...new Set(cleaned.map((h: string) => h.replace(/\s+/g, " ")))].sort((a, b) =>
+      a.localeCompare(b),
+    );
+
+    if (unique.length === 0) continue;
+    sections.push({
+      title: src.source_name,
+      markdown: unique.map((topic: string, i: number) => `${i + 1}. **${topic}**`).join("\n"),
+    });
+  }
+
+  return {
+    disease: "Daftar Murni Penyakit & Kondisi Medis",
+    sections,
+    citations: [],
+    grounded: true,
+  };
+}
+
+function injectLowEvidenceWarning(
+  answer: Record<string, unknown>,
+  evidenceCount: number,
+): Record<string, unknown> {
+  const sections = Array.isArray(answer.sections) ? [...(answer.sections as Array<Record<string, unknown>>)] : [];
+  const hasWarning = sections.some((sec) =>
+    ((sec.title ?? "").toString().toLowerCase().includes("catatan kualitas")),
+  );
+  if (!hasWarning) {
+    sections.unshift({
+      title: "Catatan Kualitas Evidence",
+      markdown:
+        `Evidence yang ditemukan terbatas (${evidenceCount} dokumen). Jawaban disusun secara konservatif dari bukti yang tersedia; gunakan verifikasi klinis lanjutan bila diperlukan.`,
+    });
+  }
+  return {
+    ...answer,
+    sections,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -762,24 +821,8 @@ app.post("/search_disease_context", async (c) => {
 
     const topics = await getTopicsFromDb(c.env, staseSlug, foundFilter);
 
-    // Build simple structured answer for list queries directly from DB
-    const sections: any[] = [];
-    for (const src of (topics.sources as any[]) ?? []) {
-      const topicsMd = (src.topics as any[])
-        .map((t: any, i: number) => `${i + 1}. **${t.heading}**`)
-        .join("\n");
-      sections.push({
-        title: src.source_name,
-        markdown: topicsMd,
-      });
-    }
-
-    let listAnswer: Record<string, any> = {
-      disease: "Daftar Lengkap Topik Knowledge Base",
-      sections: sections,
-      citations: [],
-      grounded: true,
-    };
+    let listAnswer: Record<string, any> = buildPureListFallback(topics);
+    let listRefinedByAi = false;
 
     // --- AI Refinement (Optional) ---
     if (c.env.GITHUB_TOKEN) {
@@ -789,8 +832,14 @@ app.post("/search_disease_context", async (c) => {
           topics,
           c.env.GITHUB_TOKEN,
         )) as unknown as Record<string, any>;
+        if (!Array.isArray(listAnswer.sections) || listAnswer.sections.length === 0) {
+          listAnswer = buildPureListFallback(topics);
+        } else {
+          listRefinedByAi = true;
+        }
       } catch (e) {
         console.warn("[WARN] AI list refinement failed, using raw DB list:", e);
+        listAnswer = buildPureListFallback(topics);
       }
     }
 
@@ -812,7 +861,7 @@ app.post("/search_disease_context", async (c) => {
           s.topics.map((t: any) => ({
             ...t,
             source_name: s.source_name,
-            page_no: 1, // Fallback as topics don't have page_no directly
+            page_no: Number.isFinite(t.page_no) ? Number(t.page_no) : 0,
           }))
         )
       ),
@@ -823,7 +872,9 @@ app.post("/search_disease_context", async (c) => {
         returned_count: 0,
         is_truncated: false,
       },
-      note: "Output disaring menggunakan AI untuk menampilkan hanya entitas penyakit murni.",
+      note: listRefinedByAi
+        ? "Output disaring menggunakan AI untuk menampilkan entitas penyakit murni."
+        : "Output menggunakan fallback deterministic untuk menampilkan entitas penyakit murni.",
     });
   }
 
@@ -871,8 +922,10 @@ app.post("/search_disease_context", async (c) => {
     }));
   }
 
+  const evidenceQuality = returnedCount >= MIN_EVIDENCE_FOR_AI ? "ok" : "low";
+
   let answer: Record<string, unknown>;
-  if (c.env.GITHUB_TOKEN) {
+  if (c.env.GITHUB_TOKEN && returnedCount >= MIN_EVIDENCE_FOR_AI) {
     answer = (await askCopilotAdaptive(
       payload.disease_name,
       returnedEvidence,
@@ -881,6 +934,10 @@ app.post("/search_disease_context", async (c) => {
     )) as unknown as Record<string, unknown>;
   } else {
     answer = synthesizeFallback(payload.disease_name, returnedEvidence) as unknown as Record<string, unknown>;
+  }
+
+  if (evidenceQuality === "low") {
+    answer = injectLowEvidenceWarning(answer, returnedCount);
   }
 
   return c.json({
@@ -897,6 +954,7 @@ app.post("/search_disease_context", async (c) => {
     evidence_count: returnedCount,
     evidence: returnedEvidence,
     draft_answer: answer,
+    evidence_quality: evidenceQuality,
     images,
     retrieval_diagnostics: diagnostics,
     note: "Gunakan draft_answer sebagai basis penjelasan grounded.",

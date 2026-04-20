@@ -98,6 +98,13 @@ export interface RetrievalDiagnostics {
   retrieval_mode: "relevant" | "exhaustive";
 }
 
+export interface DiseaseResolutionInfo {
+  disease: string | null;
+  method: "exact" | "synonym" | "embedding" | "history" | "fallback";
+  confidence: number;
+  candidates: string[];
+}
+
 export interface LibraryGenerateRequest {
   extra_prompt?: string;
   top_k?: number;
@@ -227,6 +234,11 @@ export interface DraftAnswer {
   sections: DraftSection[];
   citations: string[];
   grounded: boolean;
+  detection_method?: string;
+  detection_confidence?: number;
+  answer_confidence?: number;
+  section_confidence_map?: Record<string, number>;
+  retrieval_passes?: number;
   evidence_coverage?: {
     total_evidence: number;
     used_evidence: number[];
