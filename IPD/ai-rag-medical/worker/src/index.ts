@@ -8,6 +8,7 @@ import { z, ZodError } from "zod";
 import type { Env, ChunkRecord } from "./types";
 import {
   searchChunks,
+  searchChunksWithDiagnostics,
   relatedImages,
   getKnowledgeGraph,
   synthesizeFallback,
@@ -802,7 +803,8 @@ app.post("/search_disease_context", async (c) => {
   const detectedIntent = extractTopicIntent(payload.disease_name);
   const det = isDetailRequest(payload.disease_name);
   const detectedListingIntent = isListingIntent(payload.disease_name);
-  const questionStyle = buildQuestionPlan(payload.disease_name).style;
+  const questionPlan = buildQuestionPlan(payload.disease_name);
+  const questionStyle = questionPlan.style;
 
   // Compute pagination metadata
   const pageSize = payload.page_size ?? 50;
@@ -849,6 +851,11 @@ app.post("/search_disease_context", async (c) => {
       query: payload.disease_name,
       query_analysis: {
         is_list_intent: true,
+        question_style: questionStyle,
+        style_confidence: questionPlan.styleConfidence,
+        intent_confidence: questionPlan.intentConfidence,
+        ambiguity: questionPlan.ambiguity,
+        ambiguity_candidates: questionPlan.ambiguityCandidates,
         retrieval_mode: mode,
       },
       retrieval_mode: mode,
@@ -880,7 +887,7 @@ app.post("/search_disease_context", async (c) => {
     });
   }
 
-  const evidence = await searchChunks(
+  const retrieval = await searchChunksWithDiagnostics(
     c.env,
     payload.disease_name,
     payload.top_k,
@@ -888,6 +895,7 @@ app.post("/search_disease_context", async (c) => {
     staseSlug,
     mode,
   );
+  const evidence = retrieval.chunks;
 
   const maxItems = payload.max_items ?? null;
   const totalCandidates = evidence.length;
@@ -910,6 +918,11 @@ app.post("/search_disease_context", async (c) => {
     returned_count: returnedCount,
     is_truncated: isTruncated,
     retrieval_mode: mode,
+    retrieval_passes: retrieval.diagnostics.retrieval_passes ?? 1,
+    retry_mode: retrieval.diagnostics.retry_mode ?? "none",
+    retry_reason: retrieval.diagnostics.retry_reason ?? "stable-primary-pass",
+    resolution_method: retrieval.diagnostics.resolution_method,
+    resolution_confidence: retrieval.diagnostics.resolution_confidence,
   };
 
   let images: Record<string, unknown>[] = [];
@@ -942,6 +955,12 @@ app.post("/search_disease_context", async (c) => {
     answer = injectLowEvidenceWarning(answer, returnedCount);
   }
 
+  if (typeof answer.retrieval_passes !== "number") {
+    answer.retrieval_passes = diagnostics.retrieval_passes ?? 1;
+  }
+  answer.retry_mode = diagnostics.retry_mode;
+  answer.retry_reason = diagnostics.retry_reason;
+
   return c.json({
     query: payload.disease_name,
     query_analysis: {
@@ -950,6 +969,10 @@ app.post("/search_disease_context", async (c) => {
       is_detail_request: det,
       is_list_intent: detectedListingIntent,
       question_style: questionStyle,
+      style_confidence: questionPlan.styleConfidence,
+      intent_confidence: questionPlan.intentConfidence,
+      ambiguity: questionPlan.ambiguity,
+      ambiguity_candidates: questionPlan.ambiguityCandidates,
       retrieval_mode: mode,
     },
     retrieval_mode: mode,

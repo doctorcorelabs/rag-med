@@ -353,6 +353,10 @@ export interface QuestionPlan {
   sectionHints: string[];
   queryVariants: string[];
   focusTerms: string[];
+  styleConfidence: number;
+  intentConfidence: number;
+  ambiguity: boolean;
+  ambiguityCandidates: string[];
 }
 
 function dedupePlanTerms(terms: string[]): string[] {
@@ -360,19 +364,71 @@ function dedupePlanTerms(terms: string[]): string[] {
 }
 
 export function detectQuestionStyle(query: string): QuestionStyle {
+  return detectQuestionStyleWithConfidence(query).style;
+}
+
+function detectQuestionStyleWithConfidence(query: string): { style: QuestionStyle; confidence: number } {
   const q = query.toLowerCase();
-  if (LIST_INTENT_KEYWORDS.some((kw) => q.includes(kw))) return "list";
-  if (/(banding|dibanding|perbandingan|beda|perbedaan|vs\.?|versus)/i.test(q)) return "comparison";
-  if (/(langkah|prosedur|alur|flowchart|skema|tata laksana|penatalaksanaan|operasi|terapi)/i.test(q)) return "procedure";
-  if (/(diagnosis|diagnostik|pemeriksaan|skrining|algoritma|red flag|banding)/i.test(q)) return "diagnostic";
-  if (isDetailRequest(q)) return "detail";
-  return "overview";
+  if (LIST_INTENT_KEYWORDS.some((kw) => q.includes(kw))) {
+    return { style: "list", confidence: 0.95 };
+  }
+  if (/(banding|dibanding|perbandingan|beda|perbedaan|vs\.?|versus)/i.test(q)) {
+    return { style: "comparison", confidence: 0.9 };
+  }
+  if (/(langkah|prosedur|alur|flowchart|skema|tata laksana|penatalaksanaan|operasi|terapi)/i.test(q)) {
+    return { style: "procedure", confidence: 0.86 };
+  }
+  if (/(diagnosis|diagnostik|pemeriksaan|skrining|algoritma|red flag|banding)/i.test(q)) {
+    return { style: "diagnostic", confidence: 0.82 };
+  }
+  if (isDetailRequest(q)) {
+    return { style: "detail", confidence: 0.8 };
+  }
+  return { style: "overview", confidence: 0.58 };
+}
+
+function estimateIntentConfidence(query: string, intentCategory: string | null): number {
+  if (!intentCategory) return 0.3;
+  const q = query.toLowerCase();
+  const matched = Object.keys(INTENT_MAP)
+    .filter((k) => INTENT_MAP[k] === intentCategory)
+    .filter((k) => q.includes(k));
+  if (matched.length >= 2) return 0.9;
+  if (matched.length === 1) {
+    return matched[0].includes(" ") ? 0.84 : 0.76;
+  }
+  return 0.62;
+}
+
+function estimateAmbiguityCandidates(query: string): { ambiguity: boolean; candidates: string[] } {
+  const seen = new Set<string>();
+  const scored: Array<{ disease: string; score: number }> = [];
+  for (const disease of DISEASE_KEYWORDS) {
+    if (seen.has(disease)) continue;
+    seen.add(disease);
+    const score = scoreMedicalTermSimilarity(query, disease);
+    if (score >= 0.38) scored.push({ disease, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored[0];
+  const second = scored[1];
+  if (!top) return { ambiguity: false, candidates: [] };
+
+  const closeTopPair = !!second && top.score - second.score <= 0.08 && second.score >= 0.45;
+  const lowConfidenceTop = top.score < 0.62;
+  const ambiguity = closeTopPair || lowConfidenceTop;
+  const candidates = scored.slice(0, 3).map((s) => s.disease);
+  return { ambiguity, candidates };
 }
 
 export function buildQuestionPlan(query: string): QuestionPlan {
-  const style = detectQuestionStyle(query);
+  const { style, confidence: styleConfidence } = detectQuestionStyleWithConfidence(query);
   const normalized = normalizeMedicalTerm(query);
   const tokens = dedupePlanTerms(normalized.split(/\s+/).filter((t) => t.length > 2));
+  const intentCategory = extractTopicIntent(query);
+  const intentConfidence = estimateIntentConfidence(query, intentCategory);
+  const { ambiguity, candidates } = estimateAmbiguityCandidates(query);
 
   const baseHintsByStyle: Record<QuestionStyle, string[]> = {
     detail: ["definisi", "etiologi", "patogenesis", "manifestasi klinis", "diagnosis", "tatalaksana", "komplikasi", "prognosis"],
@@ -425,6 +481,10 @@ export function buildQuestionPlan(query: string): QuestionPlan {
     sectionHints: baseHintsByStyle[style],
     queryVariants: queryVariantsByStyle[style],
     focusTerms,
+    styleConfidence,
+    intentConfidence,
+    ambiguity,
+    ambiguityCandidates: candidates,
   };
 }
 

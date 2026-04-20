@@ -96,6 +96,16 @@ export interface RetrievalDiagnostics {
   is_truncated: boolean;
   /** Resolved retrieval mode used for the request. */
   retrieval_mode: "relevant" | "exhaustive";
+  /** Total retrieval passes executed. */
+  retrieval_passes?: number;
+  /** Retry strategy used on second pass when present. */
+  retry_mode?: "none" | "recall" | "precision";
+  /** Human-readable reason why retry was triggered. */
+  retry_reason?: string;
+  /** Disease/entity resolver method used by retriever. */
+  resolution_method?: "exact" | "synonym" | "embedding" | "history" | "fallback";
+  /** Resolver confidence (0-1). */
+  resolution_confidence?: number;
 }
 
 export interface DiseaseResolutionInfo {
@@ -235,6 +245,10 @@ export interface DraftAnswer {
   citations: string[];
   grounded: boolean;
   question_style?: string;
+  style_confidence?: number;
+  intent_confidence?: number;
+  ambiguity?: boolean;
+  ambiguity_candidates?: string[];
   detection_method?: string;
   detection_confidence?: number;
   answer_confidence?: number;
@@ -245,8 +259,14 @@ export interface DraftAnswer {
     total_citations: number;
     relevant_citations: number;
     filtered_citations: number;
+    unsupported_claims_removed: number;
+    section_unsupported_removed_map: Record<string, number>;
   };
   retrieval_passes?: number;
+  retry_mode?: "none" | "recall" | "precision";
+  retry_reason?: string;
+  regenerated_sections?: string[];
+  section_regeneration_passes?: number;
   evidence_coverage?: {
     total_evidence: number;
     used_evidence: number[];

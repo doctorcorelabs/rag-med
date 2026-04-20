@@ -2,7 +2,7 @@
 // Replaces: retriever.py (search_chunks, related_images, get_knowledge_graph)
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import type { Env, ChunkRecord, ImageRecord, DiseaseResolutionInfo } from "./types";
+import type { Env, ChunkRecord, ImageRecord, DiseaseResolutionInfo, RetrievalDiagnostics } from "./types";
 import { WORKERS_EMBEDDING_MODEL } from "./indexer";
 import {
   extractDiseaseName,
@@ -37,6 +37,27 @@ const MIN_FILTERED_RESULTS = 2;
 const DYNAMIC_LEXICON_CACHE_TTL_MS = 30 * 60 * 1000;
 const DYNAMIC_LEXICON_MAX_ROWS = 2500;
 const DETAIL_FILLER_WORDS_RE = /\b(jelaskan|jelasin|menjelaskan|secara|detail|lengkap|komprehensif|selengkap|keseluruhan|tentang|apa itu)\b/gi;
+const GENERIC_PRECISION_HEADINGS = new Set([
+  "definisi",
+  "etiologi",
+  "patogenesis",
+  "anamnesis",
+  "manifestasi klinis",
+  "pemeriksaan fisik",
+  "diagnosis",
+  "tatalaksana",
+  "komplikasi",
+  "prognosis",
+  "ringkasan",
+  "ringkasan klinis",
+]);
+
+type RetryMode = "none" | "recall" | "precision";
+
+export interface SearchChunksResult {
+  chunks: ChunkRecord[];
+  diagnostics: RetrievalDiagnostics;
+}
 
 type LexiconCacheEntry = {
   loadedAt: number;
@@ -197,6 +218,39 @@ function normalizeDetailBaseQuery(query: string): string {
 
   const tokens = normalized.split(" ").filter((t) => t.length > 2);
   return tokens.length > 0 ? tokens.join(" ") : normalized;
+}
+
+function chunkMentionsDisease(chunk: ChunkRecord, disease: string): boolean {
+  const diseaseNorm = normalizeMedicalTerm(disease);
+  if (!diseaseNorm) return false;
+  const surface = normalizeMedicalTerm(
+    [chunk.heading, chunk.parent_heading, chunk.section_category, chunk.content.slice(0, 220)].join(" "),
+  );
+  return surface.includes(diseaseNorm);
+}
+
+function computePrecisionRisk(
+  chunks: ChunkRecord[],
+  resolvedDisease: string | null,
+  plan: QuestionPlan,
+): { risk: boolean; noisyRatio: number } {
+  if (!resolvedDisease || chunks.length < 6) return { risk: false, noisyRatio: 0 };
+  const focusTop = chunks.slice(0, Math.min(10, chunks.length));
+  let noisy = 0;
+
+  for (const chunk of focusTop) {
+    const mentionsDisease = chunkMentionsDisease(chunk, resolvedDisease);
+    const heading = normalizeMedicalTerm(chunk.heading ?? "");
+    const headingGeneric = GENERIC_PRECISION_HEADINGS.has(heading.replace(/:$/, "").trim());
+    const hitFocus = plan.focusTerms.some((term) => {
+      const t = normalizeMedicalTerm(term);
+      return t && (heading.includes(t) || normalizeMedicalTerm(chunk.content.slice(0, 160)).includes(t));
+    });
+    if (!mentionsDisease && (headingGeneric || !hitFocus)) noisy += 1;
+  }
+
+  const noisyRatio = focusTop.length > 0 ? noisy / focusTop.length : 0;
+  return { risk: noisyRatio >= 0.55, noisyRatio };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,6 +489,25 @@ export async function searchChunks(
   staseSlug?: string,
   retrievalMode?: "relevant" | "exhaustive" | null,
 ): Promise<ChunkRecord[]> {
+  const result = await searchChunksWithDiagnostics(
+    env,
+    query,
+    topK,
+    chatHistory,
+    staseSlug,
+    retrievalMode,
+  );
+  return result.chunks;
+}
+
+export async function searchChunksWithDiagnostics(
+  env: Env,
+  query: string,
+  topK = 8,
+  chatHistory?: Array<{ role: string; content: string }>,
+  staseSlug?: string,
+  retrievalMode?: "relevant" | "exhaustive" | null,
+): Promise<SearchChunksResult> {
   const supabase = getSupabase(env);
   const mode = resolveRetrievalMode(query, retrievalMode);
   const isExhaustive = mode === "exhaustive";
@@ -454,26 +527,71 @@ export async function searchChunks(
   );
 
   if (isExhaustive) {
-    return primaryPass;
+    return {
+      chunks: primaryPass,
+      diagnostics: {
+        total_candidates: primaryPass.length,
+        returned_count: primaryPass.length,
+        is_truncated: false,
+        retrieval_mode: mode,
+        retrieval_passes: 1,
+        retry_mode: "none",
+        retry_reason: "exhaustive-mode",
+        resolution_method: primaryResolution.method,
+        resolution_confidence: Math.round(primaryResolution.confidence * 1000) / 1000,
+      },
+    };
   }
 
-  const shouldRetry =
-    primaryPass.length < MIN_FILTERED_RESULTS ||
-    primaryResolution.confidence < 0.35 ||
-    (!primaryResolution.disease && isDetailRequest(enrichedQuery));
+  const recallReason = primaryPass.length < MIN_FILTERED_RESULTS
+    ? "low-result-count"
+    : primaryResolution.confidence < 0.35
+      ? "low-resolution-confidence"
+      : (!primaryResolution.disease && isDetailRequest(enrichedQuery))
+        ? "detail-query-without-resolved-disease"
+        : "";
 
-  if (!shouldRetry) {
-    return primaryPass;
+  const precisionSignal = computePrecisionRisk(primaryPass, primaryResolution.disease, questionPlan);
+
+  let retryMode: RetryMode = "none";
+  let retryReason = "stable-primary-pass";
+  if (recallReason) {
+    retryMode = "recall";
+    retryReason = recallReason;
+  } else if (precisionSignal.risk) {
+    retryMode = "precision";
+    retryReason = `noisy-top-evidence:${Math.round(precisionSignal.noisyRatio * 100)}%`;
+  }
+
+  if (retryMode === "none") {
+    return {
+      chunks: primaryPass,
+      diagnostics: {
+        total_candidates: primaryPass.length,
+        returned_count: primaryPass.length,
+        is_truncated: false,
+        retrieval_mode: mode,
+        retrieval_passes: 1,
+        retry_mode: "none",
+        retry_reason: retryReason,
+        resolution_method: primaryResolution.method,
+        resolution_confidence: Math.round(primaryResolution.confidence * 1000) / 1000,
+      },
+    };
   }
 
   const retryBase = primaryResolution.disease ?? normalizeDetailBaseQuery(enrichedQuery);
-  const retryQuery = `${retryBase} definisi etiologi patogenesis diagnosis tatalaksana komplikasi prognosis`;
+  const retryQuery = retryMode === "recall"
+    ? `${retryBase} definisi etiologi patogenesis diagnosis tatalaksana komplikasi prognosis`
+    : `${retryBase} ${questionPlan.focusTerms.slice(0, 6).join(" ")} diagnosis tatalaksana`; 
   const retryResolution = await resolveDiseaseFromLexicon(env, retryQuery, staseSlug, primaryResolution.disease);
   const retryPass = await runHybridRetrievalPass(
     env,
     supabase,
     retryQuery,
-    Math.min(Math.max(topK + 4, 12), 20),
+    retryMode === "recall"
+      ? Math.min(Math.max(topK + 4, 12), 20)
+      : Math.min(Math.max(topK + 1, 10), 14),
     staseSlug,
     false,
     retryResolution.disease ?? primaryResolution.disease,
@@ -488,7 +606,25 @@ export async function searchChunks(
     return true;
   });
 
-  return deduped.length > primaryPass.length ? deduped : primaryPass;
+  const finalChunks = deduped.length > primaryPass.length ? deduped : primaryPass;
+  const finalResolution = retryResolution.confidence > primaryResolution.confidence
+    ? retryResolution
+    : primaryResolution;
+
+  return {
+    chunks: finalChunks,
+    diagnostics: {
+      total_candidates: finalChunks.length,
+      returned_count: finalChunks.length,
+      is_truncated: false,
+      retrieval_mode: mode,
+      retrieval_passes: 2,
+      retry_mode: retryMode,
+      retry_reason: retryReason,
+      resolution_method: finalResolution.method,
+      resolution_confidence: Math.round(finalResolution.confidence * 1000) / 1000,
+    },
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

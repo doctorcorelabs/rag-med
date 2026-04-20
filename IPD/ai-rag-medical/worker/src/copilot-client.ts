@@ -15,6 +15,7 @@ const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
 const COPILOT_CHAT_URL = "https://api.githubcopilot.com/chat/completions";
 const EVIDENCE_REF_RE = /\[E(\d+)\]/g;
 const EVIDENCE_BLOCK_RE = /\[([^\]]+)\]/g;
+const UNSUPPORTED_RISK_RE = /\b(dosis|mg|mcg|gram|indikasi|kontraindikasi|algoritma|prognosis|komplikasi|mortalitas|sensitivitas|spesifisitas|risiko|gold standard|stadium|grading)\b/i;
 const RELEVANCE_STOPWORDS = new Set([
   "yang", "dan", "atau", "dengan", "dari", "untuk", "pada", "oleh", "sebagai",
   "adalah", "dalam", "karena", "jika", "maka", "serta", "jadi", "agar", "terhadap",
@@ -267,6 +268,48 @@ function sanitizeSectionCitations(
     totalCitations,
     relevantCitations,
     filteredCitations,
+  };
+}
+
+function scrubUnsupportedClaims(
+  markdown: string,
+  maxEvidence: number,
+): {
+  markdown: string;
+  removedClaims: number;
+} {
+  const lines = markdown.split("\n");
+  const kept: string[] = [];
+  let removedClaims = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      kept.push(line);
+      continue;
+    }
+
+    // Keep headings/titles intact to preserve section readability.
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      kept.push(line);
+      continue;
+    }
+
+    const hasCitation = extractEvidenceRefsFromText(trimmed, maxEvidence).length > 0;
+    const hasNumericFact = /\d/.test(trimmed);
+    const hasRiskKeyword = UNSUPPORTED_RISK_RE.test(trimmed);
+    const looksFactual = hasNumericFact || hasRiskKeyword;
+
+    if (looksFactual && !hasCitation) {
+      removedClaims += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+
+  return {
+    markdown: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+    removedClaims,
   };
 }
 
@@ -573,6 +616,94 @@ function parseJsonResponse(raw: string): DraftAnswer {
   return JSON.parse(content.trim()) as DraftAnswer;
 }
 
+function buildSectionRegenerationPrompt(query: string, sectionTitles: string[], evidenceCount: number): string {
+  return `Anda adalah editor medis yang memperbaiki HANYA section dengan precision sitasi rendah.
+
+Aturan:
+1. Tulis hanya section yang diminta.
+2. Jangan ubah section lain.
+3. Setiap klaim penting harus punya citation [E1].
+4. Jika evidence tidak cukup, gunakan caveat dan jangan berhalusinasi.
+
+Query: ${query}
+Target section: ${sectionTitles.join(", ")}
+Evidence tersedia: ${evidenceCount}
+
+FORMAT OUTPUT (RAW JSON VALID):
+{
+  "sections": [
+    {"title": "Nama Section", "markdown": "Markdown section yang diperbaiki dengan citation [E1]"}
+  ]
+}
+`;
+}
+
+async function regenerateLowPrecisionSections(
+  copilotToken: string,
+  query: string,
+  currentAnswer: DraftAnswer,
+  sortedEvidence: ChunkRecord[],
+  threshold = 0.45,
+): Promise<{ answer: DraftAnswer; regeneratedSections: string[]; passes: number }> {
+  const precisionMap = currentAnswer.citation_quality?.section_precision_map ?? {};
+  const targetSections = (currentAnswer.sections ?? []).filter((section) => {
+    const score = precisionMap[section.title];
+    return typeof score === "number" && score < threshold;
+  }).slice(0, 3);
+
+  if (targetSections.length === 0) {
+    return { answer: currentAnswer, regeneratedSections: [], passes: 0 };
+  }
+
+  const evidenceContext = sortedEvidence
+    .map((item, idx) => `
+<evidence id="${idx + 1}">
+  <source>${item.source_name}</source>
+  <page>${item.page_no}</page>
+  <heading>${item.heading}</heading>
+  <section_type>${item.section_category ?? "General"}</section_type>
+  <content>
+${item.content}
+  </content>
+</evidence>`)
+    .join("\n");
+
+  const raw = await callCopilot(copilotToken, [
+    { role: "system", content: buildSectionRegenerationPrompt(query, targetSections.map((section) => section.title), sortedEvidence.length) },
+    {
+      role: "user",
+      content: `Query Klinis: ${query}\n\nSection saat ini yang perlu diperbaiki:\n${targetSections
+        .map((section) => `### ${section.title}\n${section.markdown ?? ""}`)
+        .join("\n\n")}
+\n\nEVIDENCE ASLI:\n${evidenceContext}`,
+    },
+  ]);
+
+  let parsed: { sections?: Array<{ title: string; markdown?: string }> };
+  try {
+    parsed = JSON.parse(raw.replace(/^```json\s*/, "").replace(/```$/, "")) as { sections?: Array<{ title: string; markdown?: string }> };
+  } catch {
+    return { answer: currentAnswer, regeneratedSections: [], passes: 1 };
+  }
+
+  const updatedSections = [...(currentAnswer.sections ?? [])];
+  const regeneratedSections: string[] = [];
+  for (const sec of parsed.sections ?? []) {
+    if (!sec.title || !sec.markdown) continue;
+    const idx = updatedSections.findIndex((item) => item.title === sec.title);
+    if (idx >= 0) {
+      updatedSections[idx] = { ...updatedSections[idx], markdown: sec.markdown };
+      regeneratedSections.push(sec.title);
+    }
+  }
+
+  return {
+    answer: { ...currentAnswer, sections: updatedSections },
+    regeneratedSections,
+    passes: regeneratedSections.length > 0 ? 1 : 0,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Post-processing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -598,15 +729,22 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
   let totalCitationRefs = 0;
   let relevantCitationRefs = 0;
   let filteredCitationRefs = 0;
+  let unsupportedClaimsRemoved = 0;
   const sectionPrecision: Record<string, number> = {};
+  const sectionUnsupportedRemoved: Record<string, number> = {};
 
   for (const sec of parsed.sections ?? []) {
     if (!sec.markdown) continue;
     const sanitized = sanitizeSectionCitations(sec.markdown, sortedEvidence);
-    sec.markdown = sanitized.markdown;
+    const scrubbed = scrubUnsupportedClaims(sanitized.markdown, sortedEvidence.length);
+    sec.markdown = scrubbed.markdown;
     totalCitationRefs += sanitized.totalCitations;
     relevantCitationRefs += sanitized.relevantCitations;
     filteredCitationRefs += sanitized.filteredCitations;
+    unsupportedClaimsRemoved += scrubbed.removedClaims;
+    if (scrubbed.removedClaims > 0) {
+      sectionUnsupportedRemoved[sec.title] = scrubbed.removedClaims;
+    }
     if (sanitized.totalCitations > 0) {
       sectionPrecision[sec.title] = Math.round((sanitized.relevantCitations / sanitized.totalCitations) * 1000) / 1000;
     }
@@ -646,6 +784,8 @@ function postprocessResponse(parsed: DraftAnswer, sortedEvidence: ChunkRecord[])
     total_citations: totalCitationRefs,
     relevant_citations: relevantCitationRefs,
     filtered_citations: filteredCitationRefs,
+    unsupported_claims_removed: unsupportedClaimsRemoved,
+    section_unsupported_removed_map: sectionUnsupportedRemoved,
   };
 
   // Evidence coverage
@@ -828,8 +968,37 @@ export async function askCopilotAdaptive(
       );
     }
     result.question_style = questionPlan.style;
+    result.style_confidence = questionPlan.styleConfidence;
+    result.intent_confidence = questionPlan.intentConfidence;
+    result.ambiguity = questionPlan.ambiguity;
+    result.ambiguity_candidates = questionPlan.ambiguityCandidates;
+    result.detection_method = "planner-heuristic";
+    result.detection_confidence = Math.round(Math.max(questionPlan.styleConfidence, questionPlan.intentConfidence) * 1000) / 1000;
     result.retrieval_passes = isDetail && evidence.length > 6 ? 2 : 1;
-    return postprocessResponse(result, sortedEvidence);
+    result = postprocessResponse(result, sortedEvidence);
+
+    const needsSectionRegeneration =
+      (result.citation_quality?.overall_precision ?? 1) < 0.72 ||
+      Object.values(result.citation_quality?.section_precision_map ?? {}).some((precision) => precision < 0.45);
+
+    if (needsSectionRegeneration && result.sections.length > 0) {
+      const regen = await regenerateLowPrecisionSections(
+        copilotToken,
+        diseaseName,
+        result,
+        sortedEvidence,
+      );
+      result = postprocessResponse(
+        {
+          ...regen.answer,
+          regenerated_sections: regen.regeneratedSections,
+          section_regeneration_passes: regen.passes,
+        },
+        sortedEvidence,
+      );
+    }
+
+    return result;
   } catch (e) {
     console.error("Copilot API Error:", e);
     return {
@@ -840,6 +1009,12 @@ export async function askCopilotAdaptive(
       answer_confidence: 0.05,
       section_confidence_map: { "AI Processing Error": 0.05 },
       question_style: questionPlan.style,
+      style_confidence: questionPlan.styleConfidence,
+      intent_confidence: questionPlan.intentConfidence,
+      ambiguity: questionPlan.ambiguity,
+      ambiguity_candidates: questionPlan.ambiguityCandidates,
+      detection_method: "planner-heuristic",
+      detection_confidence: Math.round(Math.max(questionPlan.styleConfidence, questionPlan.intentConfidence) * 1000) / 1000,
       retrieval_passes: 0,
     };
   }
