@@ -203,6 +203,8 @@ Gunakan list poin untuk merinci dosis berdasarkan kategori usia (misal: <1 bulan
 
 Tambahkan bagian Catatan penting untuk kontraindikasi atau peringatan khusus.`;
 
+const EXA_DEFAULT_SEARCH_TYPE = "deep-reasoning" as const;
+
 function buildExaMarkdownCandidate(result: ExaSearchResult, query: string): string {
   const lines: string[] = [];
   lines.push(`# ${result.title}`);
@@ -309,8 +311,8 @@ const MergeMarkdownSchema = z.object({
 
 const ExaSearchSchema = z.object({
   query: z.string().min(2),
-  num_results: z.number().int().min(1).max(20).default(8),
-  type: z.enum(["auto", "neural", "fast", "deep-lite", "deep", "deep-reasoning", "instant"]).default("auto"),
+  num_results: z.number().int().min(1).max(20).default(10),
+  type: z.enum(["auto", "neural", "fast", "deep-lite", "deep", "deep-reasoning", "instant"]).default(EXA_DEFAULT_SEARCH_TYPE),
   category: z.enum(["company", "research paper", "news", "personal site", "financial report", "people"]).optional(),
   include_domains: z.array(z.string().min(1)).max(12).default([]),
   exclude_domains: z.array(z.string().min(1)).max(12).default([]),
@@ -1517,13 +1519,15 @@ app.post("/library/websearch_exa", async (c) => {
 
   const requestBody: Record<string, unknown> = {
     query: payload.query,
-    type: payload.type,
+    type: payload.type || EXA_DEFAULT_SEARCH_TYPE,
     numResults: payload.num_results,
     category: payload.category ?? "research paper",
     moderation: true,
     contents: {
       highlights: { maxCharacters: 4000 },
+      text: { maxCharacters: 8000 },
     },
+    outputSchema: { type: "text" },
     systemPrompt:
       payload.system_prompt?.trim() ||
       EXA_MEDICAL_SYSTEM_PROMPT,
@@ -1553,19 +1557,43 @@ app.post("/library/websearch_exa", async (c) => {
   const data = (await response.json()) as {
     requestId?: string;
     searchType?: string;
+    resolvedSearchType?: string;
     context?: string;
+    output?: { content?: string };
+    grounding?: unknown[];
+    searchTime?: number;
+    costDollars?: Record<string, unknown>;
     results?: Array<Record<string, unknown>>;
   };
 
+  const outputContent = data.output?.content?.trim() ?? "";
   const results = (data.results ?? []).map((result) => normalizeExaResult(result, payload.query));
+  const synthesizedResult: ExaSearchResult | null = outputContent
+    ? {
+        title: payload.query,
+        url: "",
+        summary: outputContent,
+        text: outputContent,
+        markdown_candidate: outputContent,
+      }
+    : null;
+
+  const mergedResults = synthesizedResult
+    ? [synthesizedResult, ...results]
+    : results;
 
   return c.json({
     ok: true,
     request_id: data.requestId ?? null,
-    search_type: data.searchType ?? null,
+    search_type: data.searchType ?? data.resolvedSearchType ?? null,
+    resolved_search_type: data.resolvedSearchType ?? data.searchType ?? null,
     context: data.context ?? null,
     query: payload.query,
-    results,
+    output: data.output ?? (outputContent ? { content: outputContent, grounding: data.grounding ?? [] } : null),
+    grounding: data.grounding ?? null,
+    search_time: data.searchTime ?? null,
+    cost_dollars: data.costDollars ?? null,
+    results: mergedResults,
   });
 });
 

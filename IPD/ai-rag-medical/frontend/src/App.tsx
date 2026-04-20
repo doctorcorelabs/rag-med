@@ -32,17 +32,20 @@ type ImageItem = {
 type DraftSection = {
   title: string;
   markdown?: string;
+  score?: number;
   points?: string[]; // legacy fallback
 };
 
 type ApiResponse = {
   query: string;
   detail_level: string;
+  disease?: string;
   evidence_count: number;
   evidence_quality?: 'low' | 'ok';
-  evidence: EvidenceItem[];
+  resolved_search_type?: string | null;
   draft_answer: {
-    disease: string;
+    disease?: string;
+    output?: { content?: string; grounding?: unknown[] } | null;
     sections: DraftSection[];
     citations: string[];
     grounded: boolean;
@@ -71,6 +74,7 @@ type ApiResponse = {
     section_regeneration_passes?: number;
   };
   images: ImageItem[];
+  evidence: EvidenceItem[];
   retrieval_diagnostics?: {
     total_candidates: number;
     returned_count: number;
@@ -2386,13 +2390,15 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                           >
                             Bandingkan & gabungkan
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => window.open(result.url, '_blank', 'noopener,noreferrer')}
-                            className="px-3 py-2 rounded-full border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
-                          >
-                            Buka sumber
-                          </button>
+                          {result.url && (
+                            <button
+                              type="button"
+                              onClick={() => window.open(result.url, '_blank', 'noopener,noreferrer')}
+                              className="px-3 py-2 rounded-full border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                            >
+                              Buka sumber
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

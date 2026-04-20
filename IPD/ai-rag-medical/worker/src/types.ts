@@ -205,7 +205,9 @@ export interface ExaSearchResult {
 export interface ExaSearchResponse {
   requestId?: string;
   searchType?: string;
+  resolvedSearchType?: string;
   context?: string;
+  output?: { content?: string; grounding?: unknown[] } | null;
   results: ExaSearchResult[];
 }
 
