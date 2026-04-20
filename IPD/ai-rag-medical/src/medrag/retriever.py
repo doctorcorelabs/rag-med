@@ -189,18 +189,21 @@ INTENT_MAP: dict[str, str] = {
     "anamnesa": "Anamnesis",
     # Pemeriksaan fisik
     "pemeriksaan fisik": "Pemeriksaan_Fisik",
+    "pemeriksaan fisik": "Pemeriksaan_Fisik",
 }
 
 # Known disease keywords for image relevance gating
 DISEASE_KEYWORDS: list[str] = [
     # Pulmonologi
     "tuberkulosis", "tbc", "tb", "pneumonia", "asma", "copd", "ppok",
-    "bronkitis", "bronkiolitis", "bronkiektasis", "emboli", "abses",
+    "bronkitis", "bronkiolitis", "bronkiektasis", "emboli", "abses paru",
     "efusi pleura", "pneumotoraks", "atelektasis", "fibrosis",
     "kanker paru", "mesotelioma", "sarkoidosis", "hemoptisis",
     "gagal napas", "ards", "edema paru", "cor pulmonale",
     "laringitis", "trakeitis", "epiglotitis", "croup",
     "pneumonitis hipersensitif", "pneumonitis",
+    "aspirasi benda asing", "pneumonia aspirasi",
+    "abses paru", "pleuritis", "hidropneumotoraks",
     # Neonatologi/Pediatri
     "hyaline membrane disease", "hmd", "rds",
     "transient tachypnea", "respiratory distress",
@@ -230,6 +233,16 @@ LIST_INTENT_KEYWORDS: list[str] = [
     "all diseases", "list all", "list diseases",
     "seluruh penyakit",
 ]
+
+# Headings to filter out in listing mode
+_HEADING_NOISE: frozenset[str] = frozenset([
+    "definisi", "etiologi", "patofisiologi", "patogenesis",
+    "manifestasi klinis", "diagnosis", "tatalaksana", "tata laksana",
+    "komplikasi", "prognosis", "pemeriksaan fisik", "pemeriksaan penunjang",
+    "anamnesis", "faktor risiko", "diagnosis banding", "ringkasan",
+    "daftar isi", "pendahuluan", "referensi", "daftar pustaka",
+    "image from page folder", "general",
+])
 
 
 def detect_list_intent(query: str) -> bool:
@@ -264,6 +277,7 @@ def _resolve_retrieval_mode(
 def get_topics_from_db(
     db_path: "Path | None",
     stase_slug: str | None = None,
+    source_filter: str | None = None,
 ) -> dict:
     """
     Enumerasi semua heading/topik dari DB, dikelompokkan per sumber.
@@ -274,10 +288,16 @@ def get_topics_from_db(
     conn.row_factory = sqlite3.Row
     try:
         params: list = []
-        where = "WHERE heading NOT IN ('General', 'Image from page folder')"
+        noise_placeholders = ",".join("?" for _ in _HEADING_NOISE)
+        where = f"WHERE lower(heading) NOT IN ({noise_placeholders})"
+        params.extend(_HEADING_NOISE)
+        
         if stase_slug:
             where += " AND stase_slug = ?"
             params.append(stase_slug)
+        if source_filter:
+            where += " AND source_name LIKE ?"
+            params.append(f"%{source_filter}%")
 
         rows = conn.execute(
             f"""
@@ -291,6 +311,11 @@ def get_topics_from_db(
 
         grouped: dict[str, dict] = {}
         for r in rows:
+            h = r["heading"].strip()
+            # Filter noise: ignore very short headings, single digits, or pure symbols
+            if len(h) <= 2 or h.isdigit() or all(not c.isalnum() for c in h):
+                continue
+                
             src = r["source_name"]
             if src not in grouped:
                 grouped[src] = {
@@ -298,10 +323,13 @@ def get_topics_from_db(
                     "stase_slug": r["stase_slug"],
                     "topics": [],
                 }
-            grouped[src]["topics"].append({
-                "heading": r["heading"],
-                "section_category": r["section_category"],
-            })
+            # Dedup heading per source
+            existing_headings = {t["heading"] for t in grouped[src]["topics"]}
+            if h not in existing_headings:
+                grouped[src]["topics"].append({
+                    "heading": h,
+                    "section_category": r["section_category"],
+                })
 
         sources = list(grouped.values())
         for s in sources:
@@ -385,10 +413,11 @@ def _filter_by_disease_relevance(
     disease_name: str | None,
 ) -> list[dict[str, Any]]:
     """
-    Softer disease relevance filter (v2).
-    Hanya buang chunk jika heading-nya EKSPLISIT menyebut penyakit LAIN.
-    Chunk dengan heading generic (Patofisiologi, Tatalaksana, dll) TETAP dipertahankan
-    agar tidak over-filter konten yang valid.
+    Balanced disease relevance filter (v3).
+    - KEEPS chunks that explicitly mention the target disease in heading OR content
+    - KEEPS chunks with generic clinical headings (Patofisiologi, Tatalaksana, dll)
+    - REMOVES chunks whose HEADING explicitly names a DIFFERENT specific disease
+      AND whose content does NOT mention the target disease at all
     """
     if not disease_name:
         return results
@@ -398,22 +427,46 @@ def _filter_by_disease_relevance(
         for syn in MEDICAL_SYNONYMS[disease_name.lower()]:
             acceptable.add(syn.lower())
 
-    # Hanya filter penyakit lain yang panjang nama-nya (>3 char) untuk menghindari false positive
+    # Hanya filter penyakit lain yang panjang nama-nya (>4 char) untuk menghindari false positive
     other_diseases = {
         kw.lower() for kw in DISEASE_KEYWORDS
-        if kw.lower() not in acceptable and len(kw) > 3
+        if kw.lower() not in acceptable and len(kw) > 4
+    }
+
+    # Generic clinical headings that are safe to keep regardless
+    generic_headings = {
+        "patofisiologi", "patogenesis", "definisi", "etiologi",
+        "tatalaksana", "tata laksana", "manifestasi klinis",
+        "diagnosis", "komplikasi", "prognosis", "general",
+        "pemeriksaan fisik", "pemeriksaan penunjang",
+        "anamnesis", "faktor risiko", "alur diagnosis",
+        "klasifikasi", "epidemiologi", "ringkasan klinis",
     }
 
     filtered = []
     for item in results:
-        heading_lower = item.get("heading", "").lower()
-        # Hanya skip jika heading EKSPLISIT menyebut penyakit lain
-        if any(disease in heading_lower for disease in other_diseases):
+        heading_lower = item.get("heading", "").lower().rstrip(":")
+        content_lower = item.get("content", "").lower()[:600]
+
+        mentions_target = any(term in heading_lower or term in content_lower for term in acceptable)
+        is_generic_heading = any(g in heading_lower for g in generic_headings)
+        heading_mentions_other = any(disease in heading_lower for disease in other_diseases)
+
+        if mentions_target:
+            # Target disease is explicitly present → always include
+            filtered.append(item)
+        elif is_generic_heading and not heading_mentions_other:
+            # Generic clinical heading with no explicit foreign disease → include
+            filtered.append(item)
+        elif heading_mentions_other and not mentions_target:
+            # Heading is specifically about another disease → exclude
             continue
-        filtered.append(item)
+        else:
+            # Neutral chunk → include
+            filtered.append(item)
 
     # Safety fallback: jika filter terlalu agresif, kembalikan semua
-    return filtered if filtered else results
+    return filtered if len(filtered) >= 2 else results
 
 
 def search_chunks(
@@ -525,16 +578,17 @@ def search_chunks(
             pruned_results, intent_category=intent, top_k=effective_top_k * len(queries_to_run)
         )
 
-        # Context window expansion: fetch sibling chunks (skip in exhaustive mode to
-        # avoid bloating a potentially very large result set)
+        # Context window expansion: fetch sibling chunks
         if not is_exhaustive:
             expanded_results = _expand_context(conn, sorted_results, expand_siblings=1)
+            # Second disease filter pass: after expand_context, some siblings from OTHER diseases may have been pulled in
+            expanded_results = _filter_by_disease_relevance(expanded_results, detected_disease)
             # Final dedup after expansion
             final = _prune_redundant_chunks(expanded_results, similarity_threshold=0.7)
         else:
             final = sorted_results
 
-        return final[:effective_top_k * len(queries_to_run)]
+        return final[:max(effective_top_k, 20)]
     finally:
         conn.close()
 
@@ -1013,15 +1067,6 @@ def extract_disease_list_from_chunks(
     Each entry contains the canonical name plus evidence metadata.
     This is used in exhaustive/listing mode to produce a structured catalog
     rather than a narrative QA answer.
-
-    Sources considered (in priority order):
-    1. ``disease_tags`` field on the chunk
-    2. ``heading`` of the chunk (filtered to avoid generic clinical headings)
-    3. ``source_name`` as a fallback topic label
-
-    Returns a list of dicts with keys:
-      - ``name``: canonical display name
-      - ``evidence``: list of {source_name, page_no, heading}
     """
     # Generic clinical section headings that are NOT disease names
     _GENERIC_HEADINGS: frozenset[str] = frozenset([
