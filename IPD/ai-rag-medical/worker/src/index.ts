@@ -28,6 +28,7 @@ import {
   isDetailRequest,
   isListingIntent,
   resolveRetrievalMode,
+  buildQuestionPlan,
 } from "./medical-vocab";
 import { embedTexts, parsePageForIndexing } from "./indexer";
 
@@ -801,6 +802,7 @@ app.post("/search_disease_context", async (c) => {
   const detectedIntent = extractTopicIntent(payload.disease_name);
   const det = isDetailRequest(payload.disease_name);
   const detectedListingIntent = isListingIntent(payload.disease_name);
+  const questionStyle = buildQuestionPlan(payload.disease_name).style;
 
   // Compute pagination metadata
   const pageSize = payload.page_size ?? 50;
@@ -947,6 +949,7 @@ app.post("/search_disease_context", async (c) => {
       detected_intent: detectedIntent,
       is_detail_request: det,
       is_list_intent: detectedListingIntent,
+      question_style: questionStyle,
       retrieval_mode: mode,
     },
     retrieval_mode: mode,

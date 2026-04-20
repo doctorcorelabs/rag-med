@@ -19,6 +19,8 @@ import {
   normalizeMedicalTerm,
   scoreMedicalTermSimilarity,
   collectMedicalAliasCandidates,
+  buildQuestionPlan,
+  type QuestionPlan,
 } from "./medical-vocab";
 
 export function getSupabase(env: Env): SupabaseClient {
@@ -343,10 +345,12 @@ async function runHybridRetrievalPass(
   staseSlug: string | undefined,
   isExhaustive: boolean,
   resolvedDisease: string | null,
+  questionPlan?: QuestionPlan,
 ): Promise<ChunkRecord[]> {
   const enrichedQuery = query;
   const isDetail = isDetailRequest(enrichedQuery);
   const intent = extractTopicIntent(enrichedQuery);
+  const plan = questionPlan ?? buildQuestionPlan(enrichedQuery);
 
   let effectiveTopK: number;
   if (isExhaustive) {
@@ -359,11 +363,29 @@ async function runHybridRetrievalPass(
     effectiveTopK = topK;
   }
 
+  const base = resolvedDisease ?? normalizeDetailBaseQuery(enrichedQuery);
   let queriesToRun: string[];
   if (isExhaustive) {
     queriesToRun = [enrichedQuery];
-  } else if (isDetail || (resolvedDisease && !intent)) {
-    const base = resolvedDisease ?? normalizeDetailBaseQuery(enrichedQuery);
+  } else if (plan.style === "list") {
+    queriesToRun = [enrichedQuery];
+  } else if (plan.style === "comparison") {
+    queriesToRun = plan.queryVariants.map((variant) => (resolvedDisease ? `${resolvedDisease} ${variant}` : variant));
+  } else if (plan.style === "procedure") {
+    queriesToRun = [
+      `${base} langkah prosedur`,
+      `${base} indikasi kontraindikasi`,
+      `${base} komplikasi monitoring`,
+      `${base} alternatif terapi`,
+    ];
+  } else if (plan.style === "diagnostic") {
+    queriesToRun = [
+      `${base} gejala anamnesis pemeriksaan fisik`,
+      `${base} pemeriksaan penunjang diagnosis banding`,
+      `${base} algoritma diagnosis red flags`,
+      `${base} tatalaksana initial`,
+    ];
+  } else if (plan.style === "detail" || isDetail || (resolvedDisease && !intent)) {
     queriesToRun = [
       `${base} definisi etiologi patogenesis`,
       `${base} anamnesis gejala klinis pemeriksaan fisik`,
@@ -371,7 +393,7 @@ async function runHybridRetrievalPass(
       `${base} komplikasi prognosis`,
     ];
   } else {
-    queriesToRun = [enrichedQuery];
+    queriesToRun = plan.queryVariants.length > 0 ? plan.queryVariants : [enrichedQuery];
   }
 
   const [bm25Results, vectorResults] = await Promise.all([
@@ -418,6 +440,7 @@ export async function searchChunks(
   const isExhaustive = mode === "exhaustive";
 
   const enrichedQuery = enrichQueryFromHistory(query, chatHistory);
+  const questionPlan = buildQuestionPlan(enrichedQuery);
   const primaryResolution = await resolveDiseaseFromLexicon(env, enrichedQuery, staseSlug);
   const primaryPass = await runHybridRetrievalPass(
     env,
@@ -427,6 +450,7 @@ export async function searchChunks(
     staseSlug,
     isExhaustive,
     primaryResolution.disease,
+    questionPlan,
   );
 
   if (isExhaustive) {
@@ -453,6 +477,7 @@ export async function searchChunks(
     staseSlug,
     false,
     retryResolution.disease ?? primaryResolution.disease,
+    buildQuestionPlan(retryQuery),
   );
 
   const merged = [...primaryPass, ...retryPass];

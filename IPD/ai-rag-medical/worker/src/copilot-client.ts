@@ -7,6 +7,8 @@ import {
   extractTopicIntent,
   isDetailRequest,
   CLINICAL_ORDER,
+  buildQuestionPlan,
+  type QuestionStyle,
 } from "./medical-vocab";
 
 const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
@@ -231,6 +233,16 @@ function buildSystemPrompt(
   _diseaseName: string | null,
   evidenceCount: number,
 ): string {
+  const questionPlan = buildQuestionPlan(_query);
+  const styleLabel: Record<QuestionStyle, string> = {
+    detail: "pembahasan detail klinis",
+    overview: "ringkasan klinis komprehensif",
+    comparison: "perbandingan komparatif",
+    procedure: "alur/prosedur langkah-demi-langkah",
+    diagnostic: "analisis diagnostik",
+    list: "daftar atau katalog",
+    followup: "lanjutan atau klarifikasi",
+  };
   const topicNames: Record<string, string> = {
     Definisi: "Definisi",
     Etiologi: "Etiologi dan Faktor Risiko",
@@ -268,9 +280,11 @@ PENTING: Fokuskan jawaban HANYA pada topik "${topic}". Buatlah pembahasan yang M
 - Buat jumlah section sesuai kebutuhan (bisa 1-3 section yang semuanya relevan dengan topik).
 - Gunakan sub-bullet, penomoran, atau tabel untuk memperjelas.`;
   } else {
-    sectionInstruction = `Analisis pertanyaan user dan buat section yang paling relevan.
-- Jika pertanyaan umum tentang suatu penyakit, buat ringkasan klinis yang mencakup aspek-aspek utama yang tersedia di referensi.
-- Jika pertanyaan spesifik, fokuskan pada topik yang diminta.
+    sectionInstruction = `Analisis pertanyaan user sebagai ${styleLabel[questionPlan.style]}.
+- Jika pertanyaan umum, buat ringkasan klinis yang mencakup aspek-aspek utama yang tersedia di referensi.
+- Jika pertanyaan komparatif, fokus pada persamaan, perbedaan, dan implikasi klinis.
+- Jika pertanyaan prosedural, susun langkah berurutan, indikasi, kontraindikasi, dan monitoring.
+- Jika pertanyaan diagnostik, fokus pada gejala, pemeriksaan, diagnosis banding, dan red flags.
 - JANGAN masukkan section yang tidak memiliki data di referensi.
 - Jumlah section fleksibel: bisa 1 hingga 8 tergantung ketersediaan informasi.`;
   }
@@ -652,6 +666,7 @@ export async function askCopilotAdaptive(
   const intentCategory = extractTopicIntent(diseaseName);
   const isDetail = isDetailRequest(diseaseName);
   const detectedDisease = extractDiseaseName(diseaseName);
+  const questionPlan = buildQuestionPlan(diseaseName);
 
   const userPrompt = `Query Klinis: ${diseaseName}\n\nDokumen Referensi Tersedia:\n${contextText}`;
 
@@ -668,6 +683,8 @@ export async function askCopilotAdaptive(
         sortedEvidence, isDetail, intentCategory, detectedDisease, chatHistory, images,
       );
     }
+    result.question_style = questionPlan.style;
+    result.retrieval_passes = isDetail && evidence.length > 6 ? 2 : 1;
     return postprocessResponse(result, sortedEvidence);
   } catch (e) {
     console.error("Copilot API Error:", e);
@@ -678,6 +695,8 @@ export async function askCopilotAdaptive(
       grounded: false,
       answer_confidence: 0.05,
       section_confidence_map: { "AI Processing Error": 0.05 },
+      question_style: questionPlan.style,
+      retrieval_passes: 0,
     };
   }
 }

@@ -339,6 +339,95 @@ export function collectMedicalAliasCandidates(query: string): string[] {
   return [...expanded].filter((term) => term.length > 2);
 }
 
+export type QuestionStyle =
+  | "detail"
+  | "overview"
+  | "comparison"
+  | "procedure"
+  | "diagnostic"
+  | "list"
+  | "followup";
+
+export interface QuestionPlan {
+  style: QuestionStyle;
+  sectionHints: string[];
+  queryVariants: string[];
+  focusTerms: string[];
+}
+
+function dedupePlanTerms(terms: string[]): string[] {
+  return [...new Set(terms.map((term) => normalizeMedicalTerm(term)).filter((term) => term.length > 2))];
+}
+
+export function detectQuestionStyle(query: string): QuestionStyle {
+  const q = query.toLowerCase();
+  if (LIST_INTENT_KEYWORDS.some((kw) => q.includes(kw))) return "list";
+  if (/(banding|dibanding|perbandingan|beda|perbedaan|vs\.?|versus)/i.test(q)) return "comparison";
+  if (/(langkah|prosedur|alur|flowchart|skema|tata laksana|penatalaksanaan|operasi|terapi)/i.test(q)) return "procedure";
+  if (/(diagnosis|diagnostik|pemeriksaan|skrining|algoritma|red flag|banding)/i.test(q)) return "diagnostic";
+  if (isDetailRequest(q)) return "detail";
+  return "overview";
+}
+
+export function buildQuestionPlan(query: string): QuestionPlan {
+  const style = detectQuestionStyle(query);
+  const normalized = normalizeMedicalTerm(query);
+  const tokens = dedupePlanTerms(normalized.split(/\s+/).filter((t) => t.length > 2));
+
+  const baseHintsByStyle: Record<QuestionStyle, string[]> = {
+    detail: ["definisi", "etiologi", "patogenesis", "manifestasi klinis", "diagnosis", "tatalaksana", "komplikasi", "prognosis"],
+    overview: ["definisi", "gambaran umum", "etiologi", "manifestasi klinis"],
+    comparison: ["perbandingan", "indikasi", "kontraindikasi", "kelebihan", "kekurangan"],
+    procedure: ["langkah", "alur", "prosedur", "indikasi", "kontraindikasi", "komplikasi", "monitoring"],
+    diagnostic: ["gejala", "anamnesis", "pemeriksaan fisik", "pemeriksaan penunjang", "diagnosis banding", "algoritma"],
+    list: ["daftar", "katalog", "topik terkait"],
+    followup: ["lanjutan", "detail tambahan", "klarifikasi"],
+  };
+
+  const baseQuery = normalized || query;
+  const queryVariantsByStyle: Record<QuestionStyle, string[]> = {
+    detail: [
+      `${baseQuery} definisi etiologi patogenesis`,
+      `${baseQuery} manifestasi klinis diagnosis tatalaksana`,
+      `${baseQuery} komplikasi prognosis`,
+    ],
+    overview: [
+      `${baseQuery} definisi`,
+      `${baseQuery} etiologi manifestasi klinis`,
+      `${baseQuery} ringkasan klinis`,
+    ],
+    comparison: [
+      `${baseQuery} perbandingan`,
+      `${baseQuery} indikasi kontraindikasi`,
+      `${baseQuery} kelebihan kekurangan`,
+    ],
+    procedure: [
+      `${baseQuery} langkah prosedur`,
+      `${baseQuery} indikasi kontraindikasi`,
+      `${baseQuery} komplikasi monitoring`,
+    ],
+    diagnostic: [
+      `${baseQuery} diagnosis banding`,
+      `${baseQuery} pemeriksaan penunjang algoritma`,
+      `${baseQuery} red flags`,
+    ],
+    list: [baseQuery],
+    followup: [baseQuery, `${baseQuery} penjelasan detail`],
+  };
+
+  const focusTerms = dedupePlanTerms([
+    ...tokens.slice(0, 8),
+    ...baseHintsByStyle[style],
+  ]);
+
+  return {
+    style,
+    sectionHints: baseHintsByStyle[style],
+    queryVariants: queryVariantsByStyle[style],
+    focusTerms,
+  };
+}
+
 // Jaccard similarity for dedup
 export function jaccardSimilarity(a: string, b: string): number {
   const setA = new Set(a.split(/\s+/));

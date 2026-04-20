@@ -48,6 +48,7 @@ type ApiResponse = {
     grounded: boolean;
     answer_confidence?: number;
     section_confidence_map?: Record<string, number>;
+    question_style?: string;
     detection_method?: string;
     detection_confidence?: number;
     retrieval_passes?: number;
@@ -3046,6 +3047,11 @@ function AdminPanel() {
                             {typeof msg.data.draft_answer.retrieval_passes === 'number' && (
                               <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-slate-50 text-slate-600 border-slate-200">
                                 Retrieval {msg.data.draft_answer.retrieval_passes}x
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.question_style === 'string' && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-cyan-50 text-cyan-700 border-cyan-200">
+                                Style {msg.data.draft_answer.question_style}
                               </span>
                             )}
                             {typeof msg.data.draft_answer.detection_method === 'string' && (

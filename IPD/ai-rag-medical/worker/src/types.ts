@@ -234,6 +234,7 @@ export interface DraftAnswer {
   sections: DraftSection[];
   citations: string[];
   grounded: boolean;
+  question_style?: string;
   detection_method?: string;
   detection_confidence?: number;
   answer_confidence?: number;
