@@ -15,6 +15,7 @@ import {
   MEDICAL_SYNONYMS,
   DISEASE_KEYWORDS,
   CLINICAL_ORDER,
+  resolveRetrievalMode,
 } from "./medical-vocab";
 
 export function getSupabase(env: Env): SupabaseClient {
@@ -22,6 +23,10 @@ export function getSupabase(env: Env): SupabaseClient {
     auth: { persistSession: false },
   });
 }
+
+// ── Retrieval mode constants ──────────────────────────────────────────────────
+const DEFAULT_TOP_K_EXHAUSTIVE = 80;
+const MAX_TOP_K_EXHAUSTIVE = 200;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core search: Hybrid BM25 (PostgreSQL FTS) + Vector (pgvector via Workers AI)
@@ -161,18 +166,33 @@ export async function searchChunks(
   topK = 8,
   chatHistory?: Array<{ role: string; content: string }>,
   staseSlug?: string,
+  retrievalMode?: "relevant" | "exhaustive" | null,
 ): Promise<ChunkRecord[]> {
   const supabase = getSupabase(env);
+  const mode = resolveRetrievalMode(query, retrievalMode);
+  const isExhaustive = mode === "exhaustive";
+
   const enrichedQuery = enrichQueryFromHistory(query, chatHistory);
   const detectedDisease = extractDiseaseName(enrichedQuery);
   const isDetail = isDetailRequest(enrichedQuery);
   const intent = extractTopicIntent(enrichedQuery);
 
-  const effectiveTopK = isDetail ? Math.max(topK * 2, 16) : topK;
+  // Adaptive top_k — exhaustive mode takes precedence
+  let effectiveTopK: number;
+  if (isExhaustive) {
+    effectiveTopK = Math.min(Math.max(topK, DEFAULT_TOP_K_EXHAUSTIVE), MAX_TOP_K_EXHAUSTIVE);
+  } else if (isDetail) {
+    effectiveTopK = Math.max(topK * 2, 16);
+  } else {
+    effectiveTopK = topK;
+  }
 
   // Build sub-queries (multi-query decomposition)
+  // In exhaustive mode, run a single broad query to maximise coverage.
   let queriesToRun: string[];
-  if (isDetail || (detectedDisease && !intent)) {
+  if (isExhaustive) {
+    queriesToRun = [enrichedQuery];
+  } else if (isDetail || (detectedDisease && !intent)) {
     const base = detectedDisease ?? enrichedQuery;
     queriesToRun = [
       `${base} definisi etiologi patogenesis`,
@@ -208,8 +228,13 @@ export async function searchChunks(
     return true;
   });
 
-  const filtered = filterByDiseaseRelevance(deduped, detectedDisease);
-  const pruned = pruneRedundantChunks(filtered, 0.6);
+  // Disease relevance gating — skip in exhaustive mode to preserve full coverage
+  const filtered = isExhaustive ? deduped : filterByDiseaseRelevance(deduped, detectedDisease);
+
+  // Use a looser Jaccard threshold in exhaustive mode to avoid discarding
+  // legitimately distinct chunks from a broad catalog search.
+  const pruneThreshold = isExhaustive ? 0.85 : 0.6;
+  const pruned = pruneRedundantChunks(filtered, pruneThreshold);
   const sorted = hierarchicalSort(pruned, intent, effectiveTopK * queriesToRun.length);
 
   return sorted.slice(0, effectiveTopK * queriesToRun.length);

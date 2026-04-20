@@ -147,6 +147,48 @@ export const CLINICAL_ORDER: Record<string, number> = {
   Ringkasan_Klinis: 10,
 };
 
+// ── Listing / Enumeration Intent ─────────────────────────────────────────────
+
+/** Keywords that signal the user wants a full catalog/list of diseases. */
+export const LIST_INTENT_KEYWORDS: string[] = [
+  "daftar penyakit", "list penyakit", "semua penyakit",
+  "penyakit apa saja", "apa saja penyakit", "sebutkan penyakit",
+  "penyakit yang ada", "semua topik", "topik apa saja",
+  "daftar topik", "apa yang tersedia", "berikan daftar",
+  "tampilkan semua", "list semua", "semua materi",
+  "materi apa saja", "semua sumber", "list sumber",
+  "daftar semua", "semua diagnosis", "katalog penyakit",
+  "all diseases", "list all", "list diseases",
+  "semua seluruh", "seluruh penyakit",
+];
+
+/**
+ * Returns true when the query is requesting a full enumeration / catalog of
+ * diseases rather than focused information about a single condition.
+ */
+export function isListingIntent(query: string): boolean {
+  const qLower = query.toLowerCase();
+  return LIST_INTENT_KEYWORDS.some((kw) => qLower.includes(kw));
+}
+
+/**
+ * Resolve retrieval mode to either 'relevant' or 'exhaustive'.
+ *
+ * Priority:
+ *  1. Explicit requestedMode from the caller.
+ *  2. Auto-detection via isListingIntent().
+ *  3. Default: 'relevant'.
+ */
+export function resolveRetrievalMode(
+  query: string,
+  requestedMode?: "relevant" | "exhaustive" | null,
+): "relevant" | "exhaustive" {
+  if (requestedMode === "relevant" || requestedMode === "exhaustive") {
+    return requestedMode;
+  }
+  return isListingIntent(query) ? "exhaustive" : "relevant";
+}
+
 // ── Query Processing Functions ────────────────────────────────────────────────
 
 const TOKEN_RE = /[a-zA-Z][a-zA-Z0-9/-]{1,}/g;

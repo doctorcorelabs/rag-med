@@ -74,6 +74,28 @@ export interface SearchDiseaseRequest {
   top_k?: number;
   include_images?: boolean;
   chat_history?: ChatHistoryItem[];
+  /** Retrieval mode override.  When omitted, auto-detected from the query. */
+  retrieval_mode?: "relevant" | "exhaustive" | null;
+  /** Maximum items to include in the disease list (exhaustive mode). */
+  max_items?: number | null;
+  /** 1-based page index for disease list pagination (exhaustive mode). */
+  page?: number | null;
+  /** Page size for disease list pagination (exhaustive mode). */
+  page_size?: number | null;
+}
+
+// ── Retrieval Diagnostics ─────────────────────────────────────────────────────
+
+/** Metadata returned alongside search results to indicate coverage/truncation. */
+export interface RetrievalDiagnostics {
+  /** Total candidate chunks evaluated before paging. */
+  total_candidates: number;
+  /** Number of results actually returned. */
+  returned_count: number;
+  /** True if results were truncated due to max_items or page_size. */
+  is_truncated: boolean;
+  /** Resolved retrieval mode used for the request. */
+  retrieval_mode: "relevant" | "exhaustive";
 }
 
 export interface LibraryGenerateRequest {

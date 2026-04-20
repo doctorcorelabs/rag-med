@@ -23,6 +23,8 @@ import {
   extractDiseaseName,
   extractTopicIntent,
   isDetailRequest,
+  isListingIntent,
+  resolveRetrievalMode,
 } from "./medical-vocab";
 import { embedTexts, parsePageForIndexing } from "./indexer";
 
@@ -65,6 +67,12 @@ const SearchDiseaseSchema = z.object({
   include_images: z.boolean().default(true),
   chat_history: z.array(ChatHistoryItemSchema).default([]),
   stase_slug: z.string().optional().default("ipd"),
+  // Dynamic retrieval mode; when omitted, auto-detected from the query text.
+  retrieval_mode: z.enum(["relevant", "exhaustive"]).nullable().optional(),
+  // Listing/pagination controls (used in exhaustive mode)
+  max_items: z.number().int().min(1).max(500).nullable().optional(),
+  page: z.number().int().min(1).nullable().optional(),
+  page_size: z.number().int().min(1).max(200).nullable().optional(),
 });
 
 const ImageRequestSchema = z.object({
@@ -720,9 +728,17 @@ app.post("/search_disease_context", async (c) => {
   const history = payload.chat_history as Array<{ role: string; content: string }>;
   const staseSlug = payload.stase_slug ?? "ipd";
 
+  // Resolve retrieval mode (explicit override or auto-detected)
+  const mode = resolveRetrievalMode(
+    payload.disease_name,
+    (payload.retrieval_mode as "relevant" | "exhaustive" | null | undefined) ?? null,
+  );
+  const isExhaustive = mode === "exhaustive";
+
   const detectedDisease = extractDiseaseName(payload.disease_name);
   const detectedIntent = extractTopicIntent(payload.disease_name);
   const det = isDetailRequest(payload.disease_name);
+  const detectedListingIntent = isListingIntent(payload.disease_name);
 
   const evidence = await searchChunks(
     c.env,
@@ -730,10 +746,37 @@ app.post("/search_disease_context", async (c) => {
     payload.top_k,
     history.length > 0 ? history : undefined,
     staseSlug,
+    mode,
   );
 
+  // Compute pagination metadata
+  const pageSize = payload.page_size ?? 50;
+  const page = payload.page ?? 1;
+  const maxItems = payload.max_items ?? null;
+  const totalCandidates = evidence.length;
+
+  let returnedEvidence = evidence;
+  if (isExhaustive) {
+    let pool = evidence;
+    if (maxItems) pool = pool.slice(0, maxItems);
+    const start = (page - 1) * pageSize;
+    returnedEvidence = pool.slice(start, start + pageSize);
+  }
+
+  const returnedCount = returnedEvidence.length;
+  const isTruncated = isExhaustive
+    ? returnedCount < (maxItems != null ? Math.min(totalCandidates, maxItems) : totalCandidates)
+    : false;
+
+  const diagnostics = {
+    total_candidates: totalCandidates,
+    returned_count: returnedCount,
+    is_truncated: isTruncated,
+    retrieval_mode: mode,
+  };
+
   let images: Record<string, unknown>[] = [];
-  if (payload.include_images) {
+  if (payload.include_images && !isExhaustive) {
     const raw = await relatedImages(c.env, payload.disease_name, evidence, 3, staseSlug);
     images = raw.map((img) => ({
       source_name: img.source_name,
@@ -748,12 +791,12 @@ app.post("/search_disease_context", async (c) => {
   if (c.env.GITHUB_TOKEN) {
     answer = (await askCopilotAdaptive(
       payload.disease_name,
-      evidence,
+      returnedEvidence,
       c.env.GITHUB_TOKEN,
       history.length > 0 ? history : undefined,
     )) as unknown as Record<string, unknown>;
   } else {
-    answer = synthesizeFallback(payload.disease_name, evidence) as unknown as Record<string, unknown>;
+    answer = synthesizeFallback(payload.disease_name, returnedEvidence) as unknown as Record<string, unknown>;
   }
 
   return c.json({
@@ -762,12 +805,16 @@ app.post("/search_disease_context", async (c) => {
       detected_disease: detectedDisease,
       detected_intent: detectedIntent,
       is_detail_request: det,
+      is_list_intent: detectedListingIntent,
+      retrieval_mode: mode,
     },
+    retrieval_mode: mode,
     detail_level: payload.detail_level,
-    evidence_count: evidence.length,
-    evidence,
+    evidence_count: returnedCount,
+    evidence: returnedEvidence,
     draft_answer: answer,
     images,
+    retrieval_diagnostics: diagnostics,
     note: "Gunakan draft_answer sebagai basis penjelasan grounded.",
   });
 });

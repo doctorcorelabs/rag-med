@@ -28,6 +28,14 @@ MATERI_PAGE_GLOB = "**/pages/page-*/markdown.md"
 EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+# ── Retrieval mode constants ──────────────────────────────────────────────────
+# "relevant"   → default focused QA mode (bounded top_k)
+# "exhaustive" → listing/catalog mode (higher top_k, relaxed filtering)
+DEFAULT_TOP_K_RELEVANT: int = 8
+DEFAULT_TOP_K_EXHAUSTIVE: int = 80
+MAX_TOP_K_EXHAUSTIVE: int = 200
+ENABLE_EXHAUSTIVE_AUTO_MODE: bool = True
+
 # Path untuk stase dinamis (dibuat via UI Admin)
 STASE_OVERRIDES_PATH = PROJECT_ROOT / "stase_overrides.json"
 
