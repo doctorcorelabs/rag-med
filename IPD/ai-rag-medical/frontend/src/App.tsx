@@ -39,14 +39,26 @@ type ApiResponse = {
   query: string;
   detail_level: string;
   evidence_count: number;
+  evidence_quality?: 'low' | 'ok';
   evidence: EvidenceItem[];
   draft_answer: {
     disease: string;
     sections: DraftSection[];
     citations: string[];
     grounded: boolean;
+    answer_confidence?: number;
+    section_confidence_map?: Record<string, number>;
+    detection_method?: string;
+    detection_confidence?: number;
+    retrieval_passes?: number;
   };
   images: ImageItem[];
+  retrieval_diagnostics?: {
+    total_candidates: number;
+    returned_count: number;
+    is_truncated: boolean;
+    retrieval_mode: 'relevant' | 'exhaustive';
+  };
 };
 
 type ChatMessage =
@@ -255,6 +267,18 @@ const SECTION_ICONS: Record<string, string> = {
   'Komplikasi dan Prognosis': 'warning',
   'Ringkasan Klinis': 'summarize',
 };
+
+function formatConfidenceLabel(value?: number) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return null;
+  return `${Math.round(value * 100)}%`;
+}
+
+function confidenceTone(value?: number): 'high' | 'medium' | 'low' {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 'low';
+  if (value >= 0.75) return 'high';
+  if (value >= 0.45) return 'medium';
+  return 'low';
+}
 
 
 // ─── MARKDOWN COMPONENTS ────────────────────────────────────────────────────
@@ -2159,18 +2183,37 @@ export default function App() {
   };
 
   // ─── Render section content ──
-  const renderSection = (section: DraftSection, sIdx: number) => {
+  const renderSection = (section: DraftSection, sIdx: number, confidence?: number) => {
     const icon = SECTION_ICONS[section.title] || 'article';
     const content = (section.markdown ?? (section.points?.join('\n\n') ?? '')).trim();
 
     if (!content) return null;
 
     return (
-      <CollapsibleSection key={sIdx} title={section.title} icon={icon}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-          {content}
-        </ReactMarkdown>
-      </CollapsibleSection>
+      <div key={sIdx} className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-1 text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+            <span className="material-symbols-outlined text-[14px]">{icon}</span>
+            {section.title}
+          </span>
+          {typeof confidence === 'number' && (
+            <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide ${
+              confidenceTone(confidence) === 'high'
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                : confidenceTone(confidence) === 'medium'
+                  ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+            }`}>
+              Confidence {formatConfidenceLabel(confidence)}
+            </span>
+          )}
+        </div>
+        <CollapsibleSection title={section.title} icon={icon}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+            {content}
+          </ReactMarkdown>
+        </CollapsibleSection>
+      </div>
     );
   };
 
@@ -2979,6 +3022,38 @@ function AdminPanel() {
                           <h2 className="text-xl md:text-2xl lg:text-3xl font-headline font-black text-slate-800 dark:text-slate-100">
                             {msg.data.draft_answer.disease}
                           </h2>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {msg.data.evidence_quality && (
+                              <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border ${
+                                msg.data.evidence_quality === 'ok'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-amber-50 text-amber-700 border-amber-200'
+                              }`}>
+                                Evidence {msg.data.evidence_quality === 'ok' ? 'cukup' : 'rendah'}
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.answer_confidence === 'number' && (
+                              <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border ${
+                                confidenceTone(msg.data.draft_answer.answer_confidence) === 'high'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : confidenceTone(msg.data.draft_answer.answer_confidence) === 'medium'
+                                    ? 'bg-sky-50 text-sky-700 border-sky-200'
+                                    : 'bg-rose-50 text-rose-700 border-rose-200'
+                              }`}>
+                                Confidence {formatConfidenceLabel(msg.data.draft_answer.answer_confidence)}
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.retrieval_passes === 'number' && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-slate-50 text-slate-600 border-slate-200">
+                                Retrieval {msg.data.draft_answer.retrieval_passes}x
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.detection_method === 'string' && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-indigo-50 text-indigo-700 border-indigo-200">
+                                Resolver {msg.data.draft_answer.detection_method}
+                              </span>
+                            )}
+                          </div>
                           {/* Ide 11 indicator */}
                           {idx > 0 && (
                             <span className="inline-flex items-center gap-1 mt-2 text-[11px] bg-indigo-50 dark:bg-indigo-900/30 text-indigo-500 px-2 py-0.5 rounded-full border border-indigo-100">
@@ -2991,7 +3066,7 @@ function AdminPanel() {
 
                       {/* Ide 2: Rich Markdown Sections */}
                       <div className="space-y-5 md:space-y-10">
-                        {msg.data.draft_answer.sections.map((section, sIdx) => renderSection(section, sIdx))}
+                        {msg.data.draft_answer.sections.map((section, sIdx) => renderSection(section, sIdx, msg.data?.draft_answer.section_confidence_map?.[section.title]))}
                       </div>
 
                       {/* Citations */}
