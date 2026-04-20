@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 
-import type { Env, ChunkRecord } from "./types";
+import type { Env, ChunkRecord, ExaSearchResult } from "./types";
 import {
   searchChunks,
   searchChunksWithDiagnostics,
@@ -156,6 +156,126 @@ type AdminSourceSummary = {
   indexed: boolean;
 };
 
+const EXA_SEARCH_URL = "https://api.exa.ai/search";
+const EXA_MEDICAL_SYSTEM_PROMPT = `Role:
+Anda adalah seorang asisten peneliti medis yang ahli dalam menyarikan informasi klinis dari berbagai sumber literatur kesehatan. Tugas Anda adalah menyajikan informasi penyakit secara sistematis, padat, dan terstruktur untuk keperluan klinis/akademis.
+
+Tone & Style:
+
+Gunakan bahasa Indonesia formal medis.
+
+Gunakan terminologi medis yang akurat (misal: paroksismal, sianosis, leukositosis).
+
+Gunakan bolding (teks tebal) pada poin-poin krusial seperti nama bakteri, temuan laboratorium khas, dan diagnosis pasti.
+
+Wajib menyertakan sumber
+
+Output Structure:
+Anda harus mengikuti hierarki heading dan urutan bagian berikut secara ketat:
+
+# [Nama Penyakit] (Heading 1)
+
+## Definisi: Penjelasan singkat mengenai penyakit, penyebab utama, cara penularan, dan standar diagnosis pasti.
+
+## Etiologi dan Faktor Risiko: Detail agen penyebab dan mekanisme transmisi.
+
+## Patogenesis dan Patofisiologi: Mekanisme terjadinya penyakit di dalam tubuh dan dampak sistemiknya (termasuk temuan laboratorium awal).
+
+## Manifestasi Klinis:
+
+Sajikan tabel perbandingan fase penyakit (jika ada). Kolom tabel harus mencakup gejala dan durasi waktu.
+
+Berikan penjelasan teks detail untuk setiap fase di bawah tabel menggunakan list bernomor.
+
+## Gejala Khas dan Red Flags: Poin-poin mengenai gejala patognomonik (khas) dan tanda bahaya yang memerlukan penanganan segera.
+
+## Diagnosis: Penjelasan mengenai standar emas (gold standard).
+
+### Pemeriksaan Penunjang: List pemeriksaan tambahan (lab, radiologi, serologi).
+
+### Sensitivitas Pemeriksaan Penunjang Berdasarkan Fase (jika ada) Penyakit: Sajikan dalam format tabel yang membandingkan jenis tes dengan fase waktu penyakit.
+
+## Tatalaksana/Farmakologi:
+
+Sajikan pilihan obat (biasanya antibiotik atau lini pertama).
+
+Gunakan list poin untuk merinci dosis berdasarkan kategori usia (misal: <1 bulan, anak, remaja/dewasa).
+
+Tambahkan bagian Catatan penting untuk kontraindikasi atau peringatan khusus.`;
+
+function buildExaMarkdownCandidate(result: ExaSearchResult, query: string): string {
+  const lines: string[] = [];
+  lines.push(`# ${result.title}`);
+  lines.push("");
+  lines.push(`Sumber: ${result.url}`);
+  if (result.author) lines.push(`Penulis: ${result.author}`);
+  if (result.publishedDate) lines.push(`Tanggal publikasi: ${result.publishedDate}`);
+  lines.push("");
+  lines.push(`## Ringkasan web untuk: ${query}`);
+  lines.push("");
+
+  const summary = (result.summary ?? result.text ?? "").trim();
+  if (summary) {
+    lines.push(summary);
+    lines.push("");
+  }
+
+  const highlights = (result.highlights ?? []).map((item) => item.trim()).filter(Boolean);
+  if (highlights.length > 0) {
+    lines.push("## Highlight relevan");
+    lines.push("");
+    for (const highlight of highlights.slice(0, 5)) {
+      lines.push(`- ${highlight}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("## Catatan");
+  lines.push("");
+  lines.push("- Gunakan hasil ini sebagai kandidat pembanding, bukan sumber final artikel.");
+  lines.push("- Verifikasi isi dengan artikel utama sebelum dipromosikan ke Medical Library.");
+  return lines.join("\n").trim();
+}
+
+function normalizeExaResult(raw: Record<string, unknown>, query: string): ExaSearchResult {
+  const title = String(raw.title ?? "Tanpa judul").trim();
+  const url = String(raw.url ?? "").trim();
+  const publishedDate = typeof raw.publishedDate === "string" ? raw.publishedDate : undefined;
+  const author = typeof raw.author === "string" ? raw.author : undefined;
+  const image = typeof raw.image === "string" ? raw.image : undefined;
+  const favicon = typeof raw.favicon === "string" ? raw.favicon : undefined;
+  const text = typeof raw.text === "string" ? raw.text : undefined;
+  const summary = typeof raw.summary === "string" ? raw.summary : undefined;
+  const highlights = Array.isArray(raw.highlights)
+    ? raw.highlights.filter((item): item is string => typeof item === "string")
+    : undefined;
+  const highlightScores = Array.isArray(raw.highlightScores)
+    ? raw.highlightScores.filter((item): item is number => typeof item === "number")
+    : undefined;
+  const score = typeof raw.score === "number" ? raw.score : undefined;
+  const source = typeof raw.source === "string" ? raw.source : undefined;
+
+  return {
+    id: typeof raw.id === "string" ? raw.id : undefined,
+    title,
+    url,
+    publishedDate,
+    author,
+    image,
+    favicon,
+    text,
+    summary,
+    highlights,
+    highlightScores,
+    score,
+    source,
+    markdown_candidate: buildExaMarkdownCandidate(
+      { title, url, publishedDate, author, image, favicon, text, summary, highlights, highlightScores, score, source },
+      query,
+    ),
+  };
+}
+
 const MindmapNodeSchema = z.object({
   id: z.string(),
   label: z.string(),
@@ -185,6 +305,18 @@ const MindmapSaveSchema = z.object({
 const MergeMarkdownSchema = z.object({
   markdown_base: z.string().default(""),
   markdown_candidate: z.string().min(1),
+});
+
+const ExaSearchSchema = z.object({
+  query: z.string().min(2),
+  num_results: z.number().int().min(1).max(20).default(8),
+  type: z.enum(["auto", "neural", "fast", "deep-lite", "deep", "deep-reasoning", "instant"]).default("auto"),
+  category: z.enum(["company", "research paper", "news", "personal site", "financial report", "people"]).optional(),
+  include_domains: z.array(z.string().min(1)).max(12).default([]),
+  exclude_domains: z.array(z.string().min(1)).max(12).default([]),
+  start_published_date: z.preprocess((v) => (v === "" ? null : v), z.string().datetime().nullable().optional()),
+  end_published_date: z.preprocess((v) => (v === "" ? null : v), z.string().datetime().nullable().optional()),
+  system_prompt: z.preprocess((v) => (v === "" ? null : v), z.string().min(3).nullable().optional()),
 });
 
 const ConversationNoteEvidenceSchema = z.object({
@@ -1361,6 +1493,80 @@ app.post("/library/merge_markdown_copilot", async (c) => {
     c.env.GITHUB_TOKEN,
   );
   return c.json({ ok: true, markdown_merged: merged });
+});
+
+app.post("/library/websearch_exa", async (c) => {
+  const exaApiKey = c.env.EXA_API_KEY?.trim();
+  if (!exaApiKey) return c.json({ error: "EXA_API_KEY required" }, 503);
+
+  const payload = await parseBody(c, ExaSearchSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const medicalDomains = [
+    "pubmed.ncbi.nlm.nih.gov",
+    "ncbi.nlm.nih.gov",
+    "nih.gov",
+    "who.int",
+    "cdc.gov",
+    "mayoclinic.org",
+    "msdmanuals.com",
+    "medlineplus.gov",
+    "thelancet.com",
+    "nejm.org",
+  ];
+
+  const requestBody: Record<string, unknown> = {
+    query: payload.query,
+    type: payload.type,
+    numResults: payload.num_results,
+    category: payload.category ?? "research paper",
+    moderation: true,
+    contents: {
+      highlights: { maxCharacters: 4000 },
+    },
+    systemPrompt:
+      payload.system_prompt?.trim() ||
+      EXA_MEDICAL_SYSTEM_PROMPT,
+  };
+
+  requestBody.includeDomains = payload.include_domains.length > 0 ? payload.include_domains : medicalDomains;
+  if (payload.exclude_domains.length > 0) {
+    requestBody.excludeDomains = payload.exclude_domains;
+  }
+  if (payload.start_published_date) requestBody.startPublishedDate = payload.start_published_date;
+  if (payload.end_published_date) requestBody.endPublishedDate = payload.end_published_date;
+
+  const response = await fetch(EXA_SEARCH_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": exaApiKey,
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errorText = (await response.text()).slice(0, 2000);
+    return c.json({ error: `Exa search failed: ${response.status}`, detail: errorText }, 502);
+  }
+
+  const data = (await response.json()) as {
+    requestId?: string;
+    searchType?: string;
+    context?: string;
+    results?: Array<Record<string, unknown>>;
+  };
+
+  const results = (data.results ?? []).map((result) => normalizeExaResult(result, payload.query));
+
+  return c.json({
+    ok: true,
+    request_id: data.requestId ?? null,
+    search_type: data.searchType ?? null,
+    context: data.context ?? null,
+    query: payload.query,
+    results,
+  });
 });
 
 app.post("/conversation_notes", async (c) => {

@@ -137,6 +137,30 @@ type LibraryPreviewResponse = {
   persisted?: boolean;
 };
 
+type ExaSearchResult = {
+  id?: string;
+  title: string;
+  url: string;
+  publishedDate?: string;
+  author?: string;
+  image?: string;
+  favicon?: string;
+  text?: string;
+  summary?: string;
+  highlights?: string[];
+  score?: number;
+  markdown_candidate?: string;
+};
+
+type ExaSearchResponse = {
+  ok: boolean;
+  query: string;
+  request_id?: string | null;
+  search_type?: string | null;
+  context?: string | null;
+  results: ExaSearchResult[];
+};
+
 type ConversationNoteStatus = 'draft' | 'saved' | 'ready_to_promote' | 'promoted_to_library' | 'archived' | 'deleted';
 
 type ConversationNoteListItem = {
@@ -186,6 +210,20 @@ function resolveImageUrl(url: string | undefined): string {
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
   if (url.startsWith('/')) return `${API_URL}${url}`;
   return `${API_URL}/${url}`;
+}
+
+function getHostnameLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '');
+  } catch {
+    return url;
+  }
+}
+
+function formatSearchScore(score?: number): string | null {
+  if (typeof score !== 'number' || Number.isNaN(score)) return null;
+  if (score <= 1) return `${Math.round(score * 100)}%`;
+  return score.toFixed(2);
 }
 
 /** Stable identity for deduping / PATCH (local path, R2 ref, or display URL). */
@@ -292,6 +330,48 @@ function buildNoteMarkdownFromResponse(response: ApiResponse): string {
     parts.push(`\n## ${section.title}\n\n${content}`);
   }
   return parts.join('\n').trim() + '\n';
+}
+
+function buildConversationCopyMarkdown(response: ApiResponse): string {
+  const title = response.draft_answer.disease || response.query || 'Medical RAG';
+  const sections = response.draft_answer.sections ?? [];
+  const citations = response.draft_answer.citations ?? [];
+  const parts = [`# ${title}`];
+
+  for (const section of sections) {
+    const content = normalizeInlineTableMarkdown((section.markdown ?? section.points?.map((p) => `- ${p}`).join('\n') ?? '').trim());
+    if (!content) continue;
+    parts.push(`\n## ${section.title}\n\n${content}`);
+  }
+
+  if (citations.length > 0) {
+    const citationLines = citations.map((citation, index) => `${index + 1}. ${citation.replace(/^\(Sumber\)\s*/i, '').replace(/^\(Source\)\s*/i, '')}`);
+    parts.push(`\n## Referensi\n\n${citationLines.join('\n')}`);
+  }
+
+  return parts.join('\n').trim() + '\n';
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return copied;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeInlineTableMarkdown(markdown: string): string {
@@ -1320,6 +1400,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [visualSuggestions, setVisualSuggestions] = useState<ImageItem[]>([]);
   const [visualSelected, setVisualSelected] = useState<ImageItem[]>([]);
   const [mobileDetailView, setMobileDetailView] = useState(false);
+  const [webSearchOpen, setWebSearchOpen] = useState(false);
+  const [webSearchQuery, setWebSearchQuery] = useState('');
+  const [webSearchLoading, setWebSearchLoading] = useState(false);
+  const [webSearchResults, setWebSearchResults] = useState<ExaSearchResult[]>([]);
+  const [webSearchError, setWebSearchError] = useState<string | null>(null);
+  const [webSearchRequestId, setWebSearchRequestId] = useState<string | null>(null);
   const { isMobile: libMobile } = useScreenSize();
 
   useEffect(() => {
@@ -1581,6 +1667,45 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
     }
   };
 
+  const openSearchPreview = (result: ExaSearchResult) => {
+    const baseMarkdown = detail?.markdown || '';
+    setPreviewBase(baseMarkdown);
+    setPreviewCandidate(result.markdown_candidate || '');
+    setPreviewCombinedEdit(baseMarkdown);
+    setPreviewNote(result.title);
+    setPreviewOpen(true);
+  };
+
+  const runWebSearch = async (queryOverride?: string) => {
+    const diseaseName = String(detail?.disease?.name ?? '').trim();
+    const query = (queryOverride ?? webSearchQuery).trim() || diseaseName;
+    if (!query) {
+      setWebSearchError('Pilih penyakit atau isi kata kunci pencarian.');
+      return;
+    }
+
+    setWebSearchLoading(true);
+    setWebSearchError(null);
+    setWebSearchResults([]);
+    setWebSearchRequestId(null);
+    try {
+      const r = await axios.post<ExaSearchResponse>(`${API_URL}/library/websearch_exa`, {
+        query,
+        num_results: 8,
+        type: 'auto',
+      });
+      setWebSearchResults(r.data.results || []);
+      setWebSearchRequestId(r.data.request_id ?? null);
+      setWebSearchOpen(true);
+      setWebSearchQuery(query);
+    } catch (e: any) {
+      setWebSearchError(e?.response?.data?.detail || e?.response?.data?.error || e.message || 'Gagal melakukan web search.');
+      setWebSearchOpen(true);
+    } finally {
+      setWebSearchLoading(false);
+    }
+  };
+
   const staseOptions = stases.length
     ? stases
     : [{ id: 0, slug: 'ipd', display_name: 'Stase IPD', sort_order: 0, disease_count: 0, filled_count: 0 }];
@@ -1792,6 +1917,19 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                     className="px-4 py-2 rounded-full border border-violet-200 bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 text-sm"
                   >
                     Instruksi AI
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      const seed = String(detail.disease.name ?? '').trim() || detail.disease.catalog_no?.toString?.() || '';
+                      setWebSearchQuery(seed);
+                      setWebSearchOpen(true);
+                      void runWebSearch(seed);
+                    }}
+                    className="px-4 py-2 rounded-full border border-cyan-200 bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300 text-sm"
+                  >
+                    Search Web
                   </button>
                   <button
                     type="button"
@@ -2121,6 +2259,151 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 onClick={() => void saveVisualRefs()}
               >
                 {visualBusy ? 'Menyimpan…' : 'Simpan referensi visual'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {webSearchOpen && (
+        <div
+          className="fixed inset-0 z-56 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+          onClick={() => setWebSearchOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl max-w-6xl w-full p-4 md:p-6 shadow-xl my-4 max-h-[94vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <h3 className="font-headline font-bold text-lg">Search Web dengan Exa</h3>
+                <p className="text-xs text-slate-500 mt-1">Cari sumber web medis, lalu kirim hasil terpilih ke pratinjau compare/merge.</p>
+                {webSearchRequestId && <p className="text-[11px] text-slate-400 mt-1">request_id: {webSearchRequestId}</p>}
+                {webSearchError && <p className="text-xs text-rose-600 mt-2">{webSearchError}</p>}
+              </div>
+              <button
+                type="button"
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+                onClick={() => setWebSearchOpen(false)}
+                aria-label="Tutup"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 mb-4">
+              <input
+                value={webSearchQuery}
+                onChange={(e) => setWebSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void runWebSearch();
+                  }
+                }}
+                className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-950/60 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-cyan-400"
+                placeholder="Contoh: acute pancreatitis guideline, hepatitis B treatment review"
+              />
+              <button
+                type="button"
+                disabled={webSearchLoading}
+                onClick={() => void runWebSearch()}
+                className="px-5 py-3 rounded-2xl bg-cyan-600 text-white text-sm font-medium hover:bg-cyan-700 disabled:opacity-60"
+              >
+                {webSearchLoading ? 'Mencari…' : 'Cari'}
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+              {webSearchLoading ? (
+                <div className="h-64 flex items-center justify-center text-slate-500 text-sm">
+                  Memuat hasil Exa...
+                </div>
+              ) : webSearchResults.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 p-6 text-sm text-slate-500 bg-slate-50/60 dark:bg-slate-950/40">
+                  Hasil akan tampil di sini. Gunakan tombol Search Web untuk memulai.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {webSearchResults.map((result, index) => (
+                    <div key={result.id || `${result.url}-${index}`} className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-white/85 dark:bg-slate-950/45 p-4 shadow-sm transition-all hover:border-cyan-300 hover:shadow-md">
+                      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2 mb-2">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-cyan-50 text-cyan-700 border border-cyan-100">
+                              <span className="material-symbols-outlined text-[13px]">travel_explore</span>
+                              Exa
+                            </span>
+                            {result.score !== undefined && formatSearchScore(result.score) && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100">
+                                <span className="material-symbols-outlined text-[13px]">recommend</span>
+                                Skor {formatSearchScore(result.score)}
+                              </span>
+                            )}
+                            {result.publishedDate && (
+                              <span className="px-2.5 py-1 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-500">
+                                {new Date(result.publishedDate).toLocaleDateString('id-ID')}
+                              </span>
+                            )}
+                          </div>
+
+                          <h4 className="font-semibold text-slate-800 dark:text-slate-100 leading-snug text-base md:text-[1.05rem]">
+                            {result.title}
+                          </h4>
+
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                            <span className="font-medium text-slate-600 dark:text-slate-300">{getHostnameLabel(result.url)}</span>
+                            {result.author && <span>• {result.author}</span>}
+                          </div>
+
+                          <a href={result.url} target="_blank" rel="noreferrer" className="mt-1 block text-xs text-cyan-700 dark:text-cyan-300 break-all hover:underline">
+                            {result.url}
+                          </a>
+
+                          {(result.summary || result.text) && (
+                            <p className="mt-3 text-sm text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-3 md:line-clamp-4">
+                              {result.summary || result.text}
+                            </p>
+                          )}
+
+                          {result.highlights && result.highlights.length > 0 && (
+                            <div className="mt-3 space-y-2 rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/40 p-3">
+                              {result.highlights.slice(0, 3).map((highlight, highlightIndex) => (
+                                <div key={highlightIndex} className="text-xs text-slate-500 dark:text-slate-400 flex gap-2 leading-relaxed">
+                                  <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-500 shrink-0" />
+                                  <span>{highlight}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-row lg:flex-col gap-2 shrink-0 lg:items-stretch">
+                          <button
+                            type="button"
+                            onClick={() => openSearchPreview(result)}
+                            className="px-3 py-2 rounded-full bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-50"
+                            disabled={!result.markdown_candidate}
+                          >
+                            Bandingkan & gabungkan
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => window.open(result.url, '_blank', 'noopener,noreferrer')}
+                            className="px-3 py-2 rounded-full border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            Buka sumber
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4 flex-wrap">
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setWebSearchOpen(false)}>
+                Tutup
               </button>
             </div>
           </div>
@@ -3712,14 +3995,16 @@ function AdminPanel() {
               {/* Bot Action Bar */}
               {msg.role === 'bot' && !msg.error && msg.data && (
                 <div className="flex items-center gap-1.5 md:gap-2 mt-1.5 md:mt-2 ml-2 md:ml-4 flex-wrap">
-                  <button aria-label="Copy" className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
+                  <button
+                    type="button"
+                    aria-label="Copy response"
+                    title="Copy response"
+                    onClick={() => {
+                      void copyTextToClipboard(buildConversationCopyMarkdown(msg.data!));
+                    }}
+                    className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors"
+                  >
                     <span className="material-symbols-outlined text-[18px]">content_copy</span>
-                  </button>
-                  <button aria-label="Thumbs Up" className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
-                    <span className="material-symbols-outlined text-[18px]">thumb_up</span>
-                  </button>
-                  <button aria-label="Thumbs Down" className="p-2 text-on-surface-variant hover:text-secondary hover:bg-secondary-container rounded-full transition-colors">
-                    <span className="material-symbols-outlined text-[18px]">thumb_down</span>
                   </button>
                   <button
                     onClick={() => msg.data && openNoteComposer(msg.data)}

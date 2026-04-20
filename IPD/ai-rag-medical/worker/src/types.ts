@@ -7,6 +7,8 @@ export interface Env {
   SUPABASE_SERVICE_KEY: string;
   // GitHub Copilot
   GITHUB_TOKEN: string;
+  // Exa web search
+  EXA_API_KEY?: string;
   // Cloudflare Workers AI binding
   AI: Ai;
   // Cloudflare R2 — medical images bucket
@@ -169,6 +171,42 @@ export interface MindmapSaveRequest {
 export interface LibraryMergeMarkdownRequest {
   markdown_base?: string;
   markdown_candidate: string;
+}
+
+export interface LibraryWebSearchRequest {
+  query: string;
+  num_results?: number;
+  type?: "auto" | "neural" | "fast" | "deep-lite" | "deep" | "deep-reasoning" | "instant";
+  category?: "company" | "research paper" | "news" | "personal site" | "financial report" | "people";
+  include_domains?: string[];
+  exclude_domains?: string[];
+  start_published_date?: string | null;
+  end_published_date?: string | null;
+  system_prompt?: string | null;
+}
+
+export interface ExaSearchResult {
+  id?: string;
+  title: string;
+  url: string;
+  publishedDate?: string;
+  author?: string;
+  image?: string;
+  favicon?: string;
+  text?: string;
+  summary?: string;
+  highlights?: string[];
+  highlightScores?: number[];
+  score?: number;
+  source?: string;
+  markdown_candidate?: string;
+}
+
+export interface ExaSearchResponse {
+  requestId?: string;
+  searchType?: string;
+  context?: string;
+  results: ExaSearchResult[];
 }
 
 export type ConversationNoteStatus = "draft" | "saved" | "ready_to_promote" | "promoted_to_library" | "archived" | "deleted";
