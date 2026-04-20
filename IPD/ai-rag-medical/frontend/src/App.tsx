@@ -23,7 +23,6 @@ type ImageItem = {
   heading: string;
   image_url: string;
   image_abs_path?: string;
-  /** Worker / RAG — stable key when no local path */
   image_ref?: string;
   storage_url?: string;
 };
@@ -34,6 +33,17 @@ type DraftSection = {
   markdown?: string;
   score?: number;
   points?: string[]; // legacy fallback
+};
+
+type ExaGroundingCitation = {
+  url?: string;
+  title?: string;
+};
+
+type ExaGroundingItem = {
+  field?: string;
+  citations?: ExaGroundingCitation[];
+  confidence?: string;
 };
 
 type ApiResponse = {
@@ -161,7 +171,12 @@ type ExaSearchResponse = {
   query: string;
   request_id?: string | null;
   search_type?: string | null;
+  resolved_search_type?: string | null;
   context?: string | null;
+  output?: { content?: string; grounding?: ExaGroundingItem[] } | null;
+  grounding?: ExaGroundingItem[] | null;
+  search_time?: number | null;
+  cost_dollars?: Record<string, unknown> | null;
   results: ExaSearchResult[];
 };
 
@@ -214,20 +229,6 @@ function resolveImageUrl(url: string | undefined): string {
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
   if (url.startsWith('/')) return `${API_URL}${url}`;
   return `${API_URL}/${url}`;
-}
-
-function getHostnameLabel(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./i, '');
-  } catch {
-    return url;
-  }
-}
-
-function formatSearchScore(score?: number): string | null {
-  if (typeof score !== 'number' || Number.isNaN(score)) return null;
-  if (score <= 1) return `${Math.round(score * 100)}%`;
-  return score.toFixed(2);
 }
 
 /** Stable identity for deduping / PATCH (local path, R2 ref, or display URL). */
@@ -1407,9 +1408,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [webSearchOpen, setWebSearchOpen] = useState(false);
   const [webSearchQuery, setWebSearchQuery] = useState('');
   const [webSearchLoading, setWebSearchLoading] = useState(false);
-  const [webSearchResults, setWebSearchResults] = useState<ExaSearchResult[]>([]);
+  const [webSearchPreview, setWebSearchPreview] = useState<string>('');
+  const [webSearchGrounding, setWebSearchGrounding] = useState<ExaGroundingItem[]>([]);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
   const [webSearchRequestId, setWebSearchRequestId] = useState<string | null>(null);
+  const [webSearchResolvedType, setWebSearchResolvedType] = useState<string | null>(null);
+  const [webSearchSearchTime, setWebSearchSearchTime] = useState<number | null>(null);
   const { isMobile: libMobile } = useScreenSize();
 
   useEffect(() => {
@@ -1690,16 +1694,23 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
 
     setWebSearchLoading(true);
     setWebSearchError(null);
-    setWebSearchResults([]);
+    setWebSearchPreview('');
+    setWebSearchGrounding([]);
     setWebSearchRequestId(null);
+    setWebSearchResolvedType(null);
+    setWebSearchSearchTime(null);
     try {
       const r = await axios.post<ExaSearchResponse>(`${API_URL}/library/websearch_exa`, {
         query,
-        num_results: 8,
-        type: 'auto',
+        num_results: 10,
+        type: 'deep-reasoning',
       });
-      setWebSearchResults(r.data.results || []);
       setWebSearchRequestId(r.data.request_id ?? null);
+      setWebSearchResolvedType(r.data.resolved_search_type ?? r.data.search_type ?? null);
+      setWebSearchSearchTime(typeof r.data.search_time === 'number' ? r.data.search_time : null);
+      setWebSearchGrounding((r.data.grounding ?? r.data.output?.grounding ?? []) as ExaGroundingItem[]);
+      const preview = r.data.output?.content?.trim() || r.data.results?.[0]?.markdown_candidate || '';
+      setWebSearchPreview(preview);
       setWebSearchOpen(true);
       setWebSearchQuery(query);
     } catch (e: any) {
@@ -2283,6 +2294,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 <h3 className="font-headline font-bold text-lg">Search Web dengan Exa</h3>
                 <p className="text-xs text-slate-500 mt-1">Cari sumber web medis, lalu kirim hasil terpilih ke pratinjau compare/merge.</p>
                 {webSearchRequestId && <p className="text-[11px] text-slate-400 mt-1">request_id: {webSearchRequestId}</p>}
+                {webSearchResolvedType && <p className="text-[11px] text-slate-400 mt-0.5">resolved_search_type: {webSearchResolvedType}{webSearchSearchTime ? ` • ${Math.round(webSearchSearchTime)} ms` : ''}</p>}
                 {webSearchError && <p className="text-xs text-rose-600 mt-2">{webSearchError}</p>}
               </div>
               <button
@@ -2321,88 +2333,69 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
             <div className="flex-1 min-h-0 overflow-y-auto pr-1">
               {webSearchLoading ? (
                 <div className="h-64 flex items-center justify-center text-slate-500 text-sm">
-                  Memuat hasil Exa...
+                  Memuat hasil deep-reasoning...
                 </div>
-              ) : webSearchResults.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 p-6 text-sm text-slate-500 bg-slate-50/60 dark:bg-slate-950/40">
-                  Hasil akan tampil di sini. Gunakan tombol Search Web untuk memulai.
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {webSearchResults.map((result, index) => (
-                    <div key={result.id || `${result.url}-${index}`} className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-white/85 dark:bg-slate-950/45 p-4 shadow-sm transition-all hover:border-cyan-300 hover:shadow-md">
-                      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2 mb-2">
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-cyan-50 text-cyan-700 border border-cyan-100">
-                              <span className="material-symbols-outlined text-[13px]">travel_explore</span>
-                              Exa
-                            </span>
-                            {result.score !== undefined && formatSearchScore(result.score) && (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                <span className="material-symbols-outlined text-[13px]">recommend</span>
-                                Skor {formatSearchScore(result.score)}
-                              </span>
-                            )}
-                            {result.publishedDate && (
-                              <span className="px-2.5 py-1 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-500">
-                                {new Date(result.publishedDate).toLocaleDateString('id-ID')}
-                              </span>
-                            )}
-                          </div>
+              ) : webSearchPreview ? (
+                <div className="rounded-3xl border border-cyan-200 dark:border-cyan-800 bg-white/90 dark:bg-slate-950/45 shadow-sm overflow-hidden">
+                  <div className="flex items-start justify-between gap-3 px-4 py-3 bg-cyan-50/70 dark:bg-cyan-950/30 border-b border-cyan-100 dark:border-cyan-900">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-cyan-100 text-cyan-800 border border-cyan-200">
+                          <span className="material-symbols-outlined text-[13px]">travel_explore</span>
+                          Deep reasoning preview
+                        </span>
+                        <span className="text-xs text-slate-500">Output sintetis dari Exa</span>
+                      </div>
+                      <h4 className="mt-2 text-base md:text-lg font-semibold text-slate-800 dark:text-slate-100 truncate">
+                        {webSearchQuery || 'Hasil pencarian'}
+                      </h4>
+                    </div>
+                    <div className="flex flex-col items-end gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const previewTitle = webSearchQuery || String(detail?.disease?.name ?? 'Hasil Exa');
+                          openSearchPreview({ title: previewTitle, url: '', markdown_candidate: webSearchPreview });
+                        }}
+                        className="px-3 py-2 rounded-full bg-violet-600 text-white text-xs font-medium hover:bg-violet-700"
+                      >
+                        Bandingkan & gabungkan
+                      </button>
+                    </div>
+                  </div>
 
-                          <h4 className="font-semibold text-slate-800 dark:text-slate-100 leading-snug text-base md:text-[1.05rem]">
-                            {result.title}
-                          </h4>
+                  <div className="p-4 md:p-5">
+                    <div className="prose prose-slate dark:prose-invert max-w-none text-sm md:text-[0.95rem] leading-relaxed">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                        {webSearchPreview}
+                      </ReactMarkdown>
+                    </div>
 
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                            <span className="font-medium text-slate-600 dark:text-slate-300">{getHostnameLabel(result.url)}</span>
-                            {result.author && <span>• {result.author}</span>}
-                          </div>
-
-                          <a href={result.url} target="_blank" rel="noreferrer" className="mt-1 block text-xs text-cyan-700 dark:text-cyan-300 break-all hover:underline">
-                            {result.url}
-                          </a>
-
-                          {(result.summary || result.text) && (
-                            <p className="mt-3 text-sm text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-3 md:line-clamp-4">
-                              {result.summary || result.text}
-                            </p>
-                          )}
-
-                          {result.highlights && result.highlights.length > 0 && (
-                            <div className="mt-3 space-y-2 rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/40 p-3">
-                              {result.highlights.slice(0, 3).map((highlight, highlightIndex) => (
-                                <div key={highlightIndex} className="text-xs text-slate-500 dark:text-slate-400 flex gap-2 leading-relaxed">
-                                  <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-500 shrink-0" />
-                                  <span>{highlight}</span>
-                                </div>
-                              ))}
+                    {webSearchGrounding.length > 0 && (
+                      <div className="mt-5 pt-4 border-t border-slate-200 dark:border-slate-800">
+                        <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400 font-semibold mb-3">Grounding</p>
+                        <div className="space-y-2">
+                          {webSearchGrounding.slice(0, 8).map((item, idx) => (
+                            <div key={`${item.field || 'field'}-${idx}`} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/40 p-3 text-xs text-slate-600 dark:text-slate-300">
+                              <p className="font-semibold text-slate-700 dark:text-slate-200 mb-1">{item.field || `Field ${idx + 1}`}</p>
+                              <div className="space-y-1">
+                                {(item.citations ?? []).slice(0, 4).map((citation, citationIndex) => (
+                                  <div key={`${citation.url || citation.title || 'cit'}-${citationIndex}`} className="break-all">
+                                    <span className="font-medium text-cyan-700 dark:text-cyan-300">{citation.title || 'Sumber'}</span>
+                                    {citation.url && <span className="text-slate-500"> • {citation.url}</span>}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          )}
-                        </div>
-                        <div className="flex flex-row lg:flex-col gap-2 shrink-0 lg:items-stretch">
-                          <button
-                            type="button"
-                            onClick={() => openSearchPreview(result)}
-                            className="px-3 py-2 rounded-full bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-50"
-                            disabled={!result.markdown_candidate}
-                          >
-                            Bandingkan & gabungkan
-                          </button>
-                          {result.url && (
-                            <button
-                              type="button"
-                              onClick={() => window.open(result.url, '_blank', 'noopener,noreferrer')}
-                              className="px-3 py-2 rounded-full border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
-                            >
-                              Buka sumber
-                            </button>
-                          )}
+                          ))}
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 p-6 text-sm text-slate-500 bg-slate-50/60 dark:bg-slate-950/40">
+                  Hasil deep-reasoning akan tampil di sini. Gunakan tombol Cari untuk memulai.
                 </div>
               )}
             </div>
@@ -3069,7 +3062,6 @@ function AdminPanel() {
   const [loadingSrc, setLoadingSrc] = useState(false);
   const [newSourceName, setNewSourceName] = useState('(Sumber) ');
   const [createMsg, setCreateMsg] = useState<string | null>(null);
-
   // Upload ZIP state
   const [uploadSourceName, setUploadSourceName] = useState('(Sumber) ');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -3084,8 +3076,6 @@ function AdminPanel() {
   const [pageContent, setPageContent] = useState('');
   const [savingPage, setSavingPage] = useState(false);
   const [pageMsg, setPageMsg] = useState<string | null>(null);
-
-  // Reindex state
   const [reindexing, setReindexing] = useState(false);
   const [reindexMsg, setReindexMsg] = useState<string | null>(null);
 
