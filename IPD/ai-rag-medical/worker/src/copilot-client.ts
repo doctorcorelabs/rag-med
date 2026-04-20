@@ -1082,15 +1082,19 @@ Tugas:
 2. Jelaskan perbandingan: mana yang lebih lengkap/lebih kuat, mana yang bertentangan.
 3. Tentukan apakah Kandidat Baru layak digabung, perlu revisi, atau sebaiknya ditolak.
 4. Beri rekomendasi mode merge: "replace", "append", atau "hold".
+5. Jika ada Fokus Pertanyaan dari user, jawab pertanyaan itu SECARA LANGSUNG dan SPESIFIK berbasis dua teks input.
 
 ATURAN KETAT:
 - Jangan mengarang fakta baru di luar dua teks input.
 - Jika artikel utama kosong, nilai kandidat terhadap konsistensi internal dan kehati-hatian klinis.
 - Jawab dalam Bahasa Indonesia medis formal.
 - Output HARUS JSON valid sesuai schema, tanpa markdown fence.
+- Jangan memberi jawaban generik yang sama untuk semua pertanyaan; sesuaikan isi jawaban dengan Fokus Pertanyaan.
 
 Schema output wajib:
 {
+  "focus_query": "teks fokus pertanyaan yang dibaca model",
+  "focused_answer": "jawaban spesifik untuk fokus pertanyaan (2-6 kalimat)",
   "summary": "ringkasan singkat",
   "verdict": "layak" | "perlu_revisi" | "tidak_layak",
   "accuracy_score": 0,
@@ -1111,7 +1115,7 @@ Schema output wajib:
   ]
 }`;
 
-  const user = `Fokus topik: ${query || "(tidak dispesifikkan)"}
+  const user = `Fokus pertanyaan user: ${query || "(tidak dispesifikkan)"}
 
 ## Artikel utama (saat ini)
 
@@ -1143,6 +1147,8 @@ Analisis sesuai schema JSON.`;
     const complementarityScore = Number(parsed.complementarity_score ?? 0);
 
     return {
+      focus_query: String(parsed.focus_query ?? query),
+      focused_answer: String(parsed.focused_answer ?? parsed.summary ?? ""),
       summary: String(parsed.summary ?? "Analisis berhasil dibuat."),
       verdict: ["layak", "perlu_revisi", "tidak_layak"].includes(verdict) ? verdict : "perlu_revisi",
       accuracy_score: Number.isFinite(accuracyScore) ? Math.max(0, Math.min(100, Math.round(accuracyScore))) : 0,
@@ -1156,6 +1162,8 @@ Analisis sesuai schema JSON.`;
     };
   } catch (error) {
     return {
+      focus_query: query,
+      focused_answer: "Pertanyaan fokus belum dapat dijawab otomatis. Tinjau kandidat secara manual.",
       summary: "Analisis otomatis gagal diparse; silakan tinjau kandidat secara manual.",
       verdict: "perlu_revisi",
       accuracy_score: 0,

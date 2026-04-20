@@ -167,9 +167,21 @@ Gunakan bahasa Indonesia formal medis.
 
 Gunakan terminologi medis yang akurat (misal: paroksismal, sianosis, leukositosis).
 
-Gunakan bolding (teks tebal) pada poin-poin krusial seperti nama bakteri, temuan laboratorium khas, dan diagnosis pasti.
+Gunakan bolding (teks tebal) pada poin-poin krusial seperti nama patogen, temuan laboratorium khas, diagnosis pasti, red flags, dan terapi lini pertama.
 
 Wajib menyertakan sumber
+
+Aturan format markdown (WAJIB):
+
+- Output HANYA Markdown valid, tanpa code fence.
+- Setiap heading harus berada di baris sendiri (jangan ada heading di tengah paragraf).
+- Selalu beri baris kosong sebelum dan sesudah heading.
+- Jangan menulis heading dan tabel dalam satu baris.
+- Tabel markdown harus valid GFM: header, separator, lalu satu baris data per baris.
+- DILARANG memakai "||" untuk memisahkan baris tabel; setiap baris tabel harus pada baris baru.
+- DILARANG membuat baris seperti "Judul Bagian | Kolom1 | Kolom2"; judul bagian wajib sebagai heading terpisah, lalu tabel dimulai di baris berikutnya.
+- Jika data tabel tidak memadai, gunakan bullet list terstruktur (jangan memaksakan tabel rusak).
+- Gunakan list bernomor atau bullet secara rapi; jangan gabungkan beberapa item list dalam satu baris.
 
 Output Structure:
 Anda harus mengikuti hierarki heading dan urutan bagian berikut secara ketat:
@@ -186,6 +198,12 @@ Anda harus mengikuti hierarki heading dan urutan bagian berikut secara ketat:
 
 Sajikan tabel perbandingan fase penyakit (jika ada). Kolom tabel harus mencakup gejala dan durasi waktu.
 
+Contoh format tabel yang benar:
+| Fase | Gejala Utama | Durasi |
+| --- | --- | --- |
+| Inkubasi | ... | ... |
+| Akut | ... | ... |
+
 Berikan penjelasan teks detail untuk setiap fase di bawah tabel menggunakan list bernomor.
 
 ## Gejala Khas dan Red Flags: Poin-poin mengenai gejala patognomonik (khas) dan tanda bahaya yang memerlukan penanganan segera.
@@ -195,6 +213,12 @@ Berikan penjelasan teks detail untuk setiap fase di bawah tabel menggunakan list
 ### Pemeriksaan Penunjang: List pemeriksaan tambahan (lab, radiologi, serologi).
 
 ### Sensitivitas Pemeriksaan Penunjang Berdasarkan Fase (jika ada) Penyakit: Sajikan dalam format tabel yang membandingkan jenis tes dengan fase waktu penyakit.
+
+Contoh format tabel sensitivitas yang benar:
+| Jenis Tes | Fase Awal | Fase Lanjut |
+| --- | --- | --- |
+| RT-PCR | ... | ... |
+| Antigen | ... | ... |
 
 ## Tatalaksana/Farmakologi:
 

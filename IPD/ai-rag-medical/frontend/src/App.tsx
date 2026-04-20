@@ -195,6 +195,8 @@ type CandidateComparison = {
 };
 
 type CandidateAnalysis = {
+  focus_query?: string;
+  focused_answer?: string;
   summary: string;
   verdict: 'layak' | 'perlu_revisi' | 'tidak_layak';
   accuracy_score: number;
@@ -208,6 +210,12 @@ type CandidateAnalysis = {
 type CandidateAnalysisResponse = {
   ok: boolean;
   analysis: CandidateAnalysis;
+};
+
+type PreviewChatMessage = {
+  role: 'user' | 'assistant';
+  title?: string;
+  content: string;
 };
 
 type ConversationNoteStatus = 'draft' | 'saved' | 'ready_to_promote' | 'promoted_to_library' | 'archived' | 'deleted';
@@ -426,7 +434,11 @@ function normalizeInlineTableMarkdown(markdown: string): string {
       if (firstPipe < 0) return line;
 
       const prefix = trimmed.slice(0, firstPipe).trim();
-      const tablePart = trimmed.slice(firstPipe).trim();
+      const tablePart = trimmed
+        .slice(firstPipe)
+        .trim()
+        // Fix malformed separator cells like "--- RT-PCR" into "--- | RT-PCR"
+        .replace(/(:?-{3,}:?)\s+([^|\n])/g, '$1 | $2');
 
       let cells = tablePart.split('|').map((cell) => cell.trim());
       if (cells[0] === '') cells = cells.slice(1);
@@ -466,6 +478,66 @@ function normalizeInlineTableMarkdown(markdown: string): string {
       return `${leading}${prefix}\n${tableLines}`;
     })
     .join('\n');
+}
+
+function normalizeExaPreviewMarkdown(markdown: string): string {
+  if (!markdown.trim()) return '';
+
+  const fixedHeadings = markdown
+    // Ensure heading markers are separated from title text (e.g., "##Definisi").
+    .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+    // Ensure inline headings start on a new paragraph (e.g., "... text ## Diagnosis").
+    .replace(/([^\n])\s+(#{2,6}\s+)/g, '$1\n\n$2');
+
+  const fixedListBreaks = fixedHeadings
+    // Split numbered items that are accidentally merged in one line.
+    .replace(/(\d+\.\s[^\n]+?)\s(?=\d+\.\s)/g, '$1\n');
+
+  const recoveredInlineTables = fixedListBreaks
+    // Exa sometimes concatenates table rows in one line using "||".
+    .replace(/\s*\|\|\s*/g, '\n| ');
+
+  const repairedSectionTableHeaders = recoveredInlineTables
+    .split('\n')
+    .reduce<string[]>((acc, current, index, lines) => {
+      const trimmed = current.trim();
+      const next = (lines[index + 1] || '').trim();
+
+      const isPotentialInlineHeader =
+        !trimmed.startsWith('|') &&
+        (trimmed.match(/\|/g) || []).length >= 2 &&
+        /^\|\s*:?-{3,}:?/.test(next);
+
+      if (!isPotentialInlineHeader) {
+        acc.push(current);
+        return acc;
+      }
+
+      const cells = trimmed.split('|').map((cell) => cell.trim()).filter(Boolean);
+      if (cells.length < 3) {
+        acc.push(current);
+        return acc;
+      }
+
+      const looksLikeSectionLabel = /manifestasi klinis|sensitivitas pemeriksaan|pemeriksaan penunjang|gejala khas/i.test(cells[0]);
+      const sectionLabel = looksLikeSectionLabel ? cells[0] : '';
+      const headerCells = looksLikeSectionLabel && cells.length > 3 ? cells.slice(1) : cells;
+
+      if (sectionLabel) {
+        const headingText = sectionLabel.replace(/^#+\s*/, '').trim();
+        acc.push(`## ${headingText}`);
+        acc.push('');
+      }
+      acc.push(`| ${headerCells.join(' | ')} |`);
+      return acc;
+    }, [])
+    .join('\n');
+
+  const emphasizedLabels = repairedSectionTableHeaders
+    .replace(/^Sumber:\s*/gim, '**Sumber:** ')
+    .replace(/\b(standar emas|red flags?|catatan penting)\s*:/gi, (_m, label: string) => `**${label}**:`);
+
+  return normalizeInlineTableMarkdown(emphasizedLabels).trim();
 }
 
 // ─── RESPONSIVE HOOKS ───────────────────────────────────────────────────────
@@ -1469,6 +1541,9 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [previewAnalysis, setPreviewAnalysis] = useState<CandidateAnalysis | null>(null);
   const [previewAnalysisLoading, setPreviewAnalysisLoading] = useState(false);
   const [previewAnalysisError, setPreviewAnalysisError] = useState<string | null>(null);
+  const [previewAssistantOpen, setPreviewAssistantOpen] = useState(false);
+  const [previewChatInput, setPreviewChatInput] = useState('');
+  const [previewChatHistory, setPreviewChatHistory] = useState<PreviewChatMessage[]>([]);
   const [mergeAiLoading, setMergeAiLoading] = useState(false);
   const [visualOpen, setVisualOpen] = useState(false);
   const [visualBusy, setVisualBusy] = useState(false);
@@ -1486,6 +1561,12 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [webSearchResolvedType, setWebSearchResolvedType] = useState<string | null>(null);
   const [webSearchSearchTime, setWebSearchSearchTime] = useState<number | null>(null);
   const { isMobile: libMobile } = useScreenSize();
+
+  useEffect(() => {
+    if (libMobile && listCollapsed) {
+      setListCollapsed(false);
+    }
+  }, [libMobile, listCollapsed]);
 
   useEffect(() => {
     axios
@@ -1571,12 +1652,24 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       setPreviewNote(r.data.preview_note || '');
       setPreviewAnalysis(null);
       setPreviewAnalysisError(null);
+      setPreviewAssistantOpen(false);
+      setPreviewChatHistory([]);
+      setPreviewChatInput('');
       setPreviewOpen(true);
-      void runCandidateAnalysis(
+      const analysis = await runCandidateAnalysis(
         r.data.markdown_base || '',
         r.data.markdown_candidate || '',
         String(detail?.disease?.name ?? ''),
       );
+      if (analysis) {
+        setPreviewChatHistory([
+          {
+            role: 'assistant',
+            title: 'Analisis awal',
+            content: formatPreviewAnalysisChat(analysis),
+          },
+        ]);
+      }
       await loadDiseases();
       if (selectedId) await loadDetail(selectedId);
     } catch {
@@ -1757,7 +1850,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
     if (!candidateMarkdown.trim()) {
       setPreviewAnalysis(null);
       setPreviewAnalysisError('Kandidat baru kosong, tidak dapat dianalisis.');
-      return;
+      return null;
     }
     setPreviewAnalysisLoading(true);
     setPreviewAnalysisError(null);
@@ -1768,15 +1861,64 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         focus_query: focusQuery?.trim() || undefined,
       });
       setPreviewAnalysis(r.data.analysis);
+      return r.data.analysis;
     } catch (e: any) {
       setPreviewAnalysis(null);
       setPreviewAnalysisError(e?.response?.data?.detail || e?.response?.data?.error || 'Analisis kandidat gagal dijalankan.');
+      return null;
     } finally {
       setPreviewAnalysisLoading(false);
     }
   };
 
-  const openSearchPreview = (result: ExaSearchResult) => {
+  const formatPreviewAnalysisChat = (analysis: CandidateAnalysis, question?: string) => {
+    const comparison = analysis.comparison;
+    const strengths = [
+      ...(comparison?.article_utama_strengths ?? []).slice(0, 3).map((item) => `Artikel utama: ${item}`),
+      ...(comparison?.kandidat_strengths ?? []).slice(0, 3).map((item) => `Kandidat baru: ${item}`),
+    ];
+    const gaps = (comparison?.missing_in_kandidat ?? []).slice(0, 4);
+    const additions = (comparison?.new_from_kandidat ?? []).slice(0, 4);
+    const conflicts = (comparison?.conflicts ?? []).slice(0, 4);
+    const actions = (analysis.action_points ?? []).slice(0, 5);
+    const focusedAnswer = (analysis.focused_answer ?? '').trim();
+    const verdictLabel = analysis.verdict === 'layak'
+      ? 'layak'
+      : analysis.verdict === 'perlu_revisi'
+        ? 'perlu revisi'
+        : 'belum layak';
+
+    const parts = [
+      question ? `Fokus pertanyaan: ${question}` : null,
+      focusedAnswer ? `Jawaban fokus:
+    ${focusedAnswer}` : null,
+      `Verdict: ${verdictLabel}. Akurasi ${analysis.accuracy_score}%, komplementasi ${analysis.complementarity_score}%, strategi merge ${analysis.merge_strategy}.`,
+      analysis.summary,
+      strengths.length > 0 ? `Kelebihan utama:\n- ${strengths.join('\n- ')}` : null,
+      gaps.length > 0 ? `Yang masih kurang di kandidat:\n- ${gaps.join('\n- ')}` : null,
+      additions.length > 0 ? `Yang baru dan relevan dari kandidat:\n- ${additions.join('\n- ')}` : null,
+      conflicts.length > 0 ? `Catatan konflik / perlu revisi:\n- ${conflicts.join('\n- ')}` : null,
+      actions.length > 0 ? `Saran langkah lanjut:\n- ${actions.join('\n- ')}` : null,
+    ].filter(Boolean) as string[];
+
+    return parts.join('\n\n');
+  };
+
+  const submitPreviewChat = async (questionOverride?: string) => {
+    if (!previewCandidate.trim()) return;
+    const question = (questionOverride ?? previewChatInput).trim();
+    const userMessage = question || 'Tolong kritik kandidat ini dan jelaskan apakah layak di-merge.';
+    setPreviewChatHistory((prev) => [...prev, { role: 'user', content: userMessage }]);
+    setPreviewChatInput('');
+    const analysis = await runCandidateAnalysis(previewBase, previewCandidate, userMessage);
+    if (!analysis) return;
+    setPreviewChatHistory((prev) => [
+      ...prev,
+      { role: 'assistant', title: 'Kritik & saran', content: formatPreviewAnalysisChat(analysis, userMessage) },
+    ]);
+  };
+
+  const openSearchPreview = async (result: ExaSearchResult) => {
     const baseMarkdown = detail?.markdown || '';
     const candidate = result.markdown_candidate || '';
     const queryHint = webSearchQuery || String(detail?.disease?.name ?? result.title ?? '');
@@ -1786,8 +1928,20 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
     setPreviewNote(result.title);
     setPreviewAnalysis(null);
     setPreviewAnalysisError(null);
+    setPreviewAssistantOpen(false);
+    setPreviewChatHistory([]);
+    setPreviewChatInput('');
     setPreviewOpen(true);
-    void runCandidateAnalysis(baseMarkdown, candidate, queryHint);
+    const analysis = await runCandidateAnalysis(baseMarkdown, candidate, queryHint);
+    if (analysis) {
+      setPreviewChatHistory([
+        {
+          role: 'assistant',
+          title: 'Analisis awal',
+          content: formatPreviewAnalysisChat(analysis, queryHint),
+        },
+      ]);
+    }
   };
 
   const runWebSearch = async (queryOverride?: string) => {
@@ -1815,7 +1969,8 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       setWebSearchResolvedType(r.data.resolved_search_type ?? r.data.search_type ?? null);
       setWebSearchSearchTime(typeof r.data.search_time === 'number' ? r.data.search_time : null);
       setWebSearchGrounding((r.data.grounding ?? r.data.output?.grounding ?? []) as ExaGroundingItem[]);
-      const preview = r.data.output?.content?.trim() || r.data.results?.[0]?.markdown_candidate || '';
+      const previewRaw = r.data.output?.content?.trim() || r.data.results?.[0]?.markdown_candidate || '';
+      const preview = normalizeExaPreviewMarkdown(previewRaw);
       setWebSearchPreview(preview);
       setWebSearchOpen(true);
       setWebSearchQuery(query);
@@ -1838,37 +1993,34 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         <aside className={`${
           libMobile && mobileDetailView ? 'hidden'
           : 'flex flex-col'
-        } w-full ${listCollapsed ? 'md:w-19 lg:w-21' : 'md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)]'} shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 transition-all duration-300 overflow-hidden`}>
-          <div className="p-3 md:p-4 border-b border-slate-200/50 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                {!listCollapsed ? (
-                  <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100 truncate">Medical Library</h2>
-                ) : (
-                  <span className="material-symbols-outlined text-[20px] text-slate-500">menu_book</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => void loadDiseases()}
-                  className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
-                  title="Muat ulang"
-                >
-                  <span className="material-symbols-outlined text-[20px]">refresh</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setListCollapsed((prev) => !prev)}
-                  className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
-                  title={listCollapsed ? 'Perbesar daftar' : 'Minimize daftar'}
-                >
-                  <span className="material-symbols-outlined text-[20px]">{listCollapsed ? 'chevron_right' : 'chevron_left'}</span>
-                </button>
-              </div>
-            </div>
-            {!listCollapsed && (
+        } w-full ${listCollapsed ? 'md:w-24 lg:w-26' : 'md:w-[min(300px,38vw)] lg:w-[min(380px,36vw)]'} shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 transition-all duration-300 overflow-hidden`}>
+          <div className={`${listCollapsed ? 'p-2.5 md:p-3' : 'p-3 md:p-4'} border-b border-slate-200/50 ${listCollapsed ? '' : 'space-y-3'}`}>
+            {!listCollapsed ? (
               <>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100 truncate">Medical Library</h2>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void loadDiseases()}
+                      className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                      title="Muat ulang"
+                    >
+                      <span className="material-symbols-outlined text-[20px]">refresh</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setListCollapsed((prev) => !prev)}
+                      className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                      title="Minimize daftar"
+                    >
+                      <span className="material-symbols-outlined text-[20px]">chevron_left</span>
+                    </button>
+                  </div>
+                </div>
+
                 <label className="block text-xs font-label text-slate-500">Stase</label>
                 <select
                   value={staseSlug}
@@ -1916,17 +2068,29 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   Hanya yang belum ada penjelasan
                 </label>
               </>
-            )}
-            {listCollapsed && (
-              <button
-                type="button"
-                onClick={() => setListCollapsed(false)}
-                className="w-full rounded-2xl border border-indigo-200 bg-indigo-50 px-3 py-3 text-center text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors"
-                title="Buka daftar penyakit"
-              >
-                <span className="material-symbols-outlined text-[20px]">chevron_right</span>
-                <span className="sr-only">Buka daftar penyakit</span>
-              </button>
+            ) : (
+              <div className="flex flex-col items-center gap-2.5">
+                <div className="h-10 w-10 rounded-2xl border border-indigo-200 bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                  <span className="material-symbols-outlined text-[20px]">menu_book</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadDiseases()}
+                  className="h-9 w-9 rounded-xl text-slate-500 hover:bg-white/70 dark:hover:bg-slate-800/70 flex items-center justify-center"
+                  title="Muat ulang"
+                >
+                  <span className="material-symbols-outlined text-[20px]">refresh</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setListCollapsed(false)}
+                  className="h-11 w-11 rounded-2xl border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-center"
+                  title="Perbesar daftar"
+                >
+                  <span className="material-symbols-outlined text-[20px]">chevron_right</span>
+                </button>
+                <span className="text-[10px] font-semibold text-slate-500">{progress.filled}/{progress.total}</span>
+              </div>
             )}
           </div>
           {!listCollapsed ? <div className="flex-1 overflow-y-auto p-2">
@@ -1977,7 +2141,36 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   </ul>
                 </div>
               ))}
-              </div> : null}
+              </div> : (
+            <div className="flex-1 overflow-y-auto px-2 py-3">
+              <div className="flex flex-col items-center gap-2">
+                {filtered.slice(0, 10).map((d) => {
+                  const active = selectedId === d.id;
+                  const done = d.status === 'draft' || d.status === 'published';
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => void loadDetail(d.id)}
+                      className={`w-10 h-10 rounded-xl border text-[11px] font-semibold flex items-center justify-center transition-colors ${
+                        active
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : done
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                      title={`${d.catalog_no} • ${d.name}`}
+                    >
+                      {String(d.catalog_no)}
+                    </button>
+                  );
+                })}
+                {filtered.length > 10 && (
+                  <span className="text-[10px] text-slate-400">+{filtered.length - 10}</span>
+                )}
+              </div>
+            </div>
+          )}
         </aside>
 
         {/* Detail column — hidden on mobile unless detail selected */}
@@ -2033,64 +2226,98 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                     </span>
                   </p>
                 </div>
-                <div className="grid grid-cols-2 md:flex md:flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={busy || previewLoading}
-                    onClick={() => void handlePreview()}
-                    className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
-                  >
-                    {previewLoading ? '…' : 'Pratinjau regenerate'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy || previewLoading}
-                    onClick={() => void handleGenerate()}
-                    className="px-4 py-2 rounded-full border border-indigo-200 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-200 text-sm font-medium hover:bg-indigo-100 disabled:opacity-50"
-                    title="Menimpa artikel di disk tanpa pratinjau"
-                  >
-                    {busy ? '…' : 'Simpan langsung'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy || !detail.markdown}
-                    onClick={() => {
-                      setEditMarkdown(detail.markdown || '');
-                      setEditOpen(true);
-                    }}
-                    className="px-4 py-2 rounded-full border border-slate-200 dark:border-slate-600 text-sm"
-                  >
-                    Sunting
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy || !detail.markdown}
-                    onClick={() => setRefineOpen(true)}
-                    className="px-4 py-2 rounded-full border border-violet-200 bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 text-sm"
-                  >
-                    Instruksi AI
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => {
-                      const seed = String(detail.disease.name ?? '').trim() || detail.disease.catalog_no?.toString?.() || '';
-                      setWebSearchQuery(seed);
-                      setWebSearchOpen(true);
-                      void runWebSearch(seed);
-                    }}
-                    className="px-4 py-2 rounded-full border border-cyan-200 bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300 text-sm"
-                  >
-                    Search Web
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy || !detail.markdown}
-                    onClick={() => void handleDelete()}
-                    className="px-4 py-2 rounded-full border border-red-200 text-red-600 text-sm hover:bg-red-50"
-                  >
-                    Hapus
-                  </button>
+                <div className="min-w-full md:min-w-0 md:ml-auto w-full md:w-auto">
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold ${
+                      detail.markdown?.trim()
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200'
+                    }`}>
+                      <span className="material-symbols-outlined text-[14px]">
+                        {detail.markdown?.trim() ? 'check_circle' : 'pending'}
+                      </span>
+                      {detail.markdown?.trim() ? 'Artikel tersedia' : 'Artikel belum dibuat'}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 text-xs font-semibold bg-slate-50">
+                      <span className="material-symbols-outlined text-[14px]">auto_awesome</span>
+                      Mode kerja: sederhana
+                    </span>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200/70 dark:border-slate-700 bg-white/80 dark:bg-slate-900/50 p-3 md:p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Aksi utama</p>
+                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-1">
+                          {detail.markdown?.trim()
+                            ? 'Bandingkan artikel utama dan kandidat baru dalam satu pratinjau, lalu simpan.'
+                            : 'Generate kandidat pertama untuk membentuk artikel penyakit ini.'}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 justify-end">
+                        <button
+                          type="button"
+                          disabled={busy || previewLoading}
+                          onClick={() => (detail.markdown ? void handlePreview() : void handleGenerate())}
+                          className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+                        >
+                          {previewLoading ? '…' : detail.markdown ? 'Pratinjau regenerate' : 'Generate kandidat'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy || previewLoading}
+                          onClick={() => void handleGenerate()}
+                          className="px-4 py-2 rounded-full border border-indigo-200 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-200 text-sm font-medium hover:bg-indigo-100 disabled:opacity-50"
+                          title="Menimpa artikel di disk tanpa pratinjau"
+                        >
+                          {busy ? '…' : 'Simpan langsung'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={busy || !detail.markdown}
+                        onClick={() => {
+                          setEditMarkdown(detail.markdown || '');
+                          setEditOpen(true);
+                        }}
+                        className="px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-600 text-sm"
+                      >
+                        Sunting
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !detail.markdown}
+                        onClick={() => setRefineOpen(true)}
+                        className="px-3 py-1.5 rounded-full border border-violet-200 bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 text-sm"
+                      >
+                        Instruksi AI
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          const seed = String(detail.disease.name ?? '').trim() || detail.disease.catalog_no?.toString?.() || '';
+                          setWebSearchQuery(seed);
+                          setWebSearchOpen(true);
+                          void runWebSearch(seed);
+                        }}
+                        className="px-3 py-1.5 rounded-full border border-cyan-200 bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300 text-sm"
+                      >
+                        Search Web
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !detail.markdown}
+                        onClick={() => void handleDelete()}
+                        className="px-3 py-1.5 rounded-full border border-red-200 text-red-600 text-sm hover:bg-red-50"
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2208,10 +2435,10 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       {previewOpen && (
         <div
           className="fixed inset-0 z-60 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
-          onClick={() => setPreviewOpen(false)}
+          onClick={() => { setPreviewOpen(false); setPreviewAssistantOpen(false); }}
         >
           <div
-            className="bg-white dark:bg-slate-900 rounded-2xl max-w-[min(96rem,100%)] w-full p-4 md:p-6 shadow-xl my-4 max-h-[95vh] flex flex-col"
+            className="bg-white dark:bg-slate-900 rounded-2xl max-w-[min(120rem,100%)] w-full p-4 md:p-6 shadow-xl my-4 max-h-[96vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex justify-between items-start gap-2 mb-3">
@@ -2220,94 +2447,47 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 <p className="text-xs text-slate-500 mt-1">{previewNote}</p>
                 {err && <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 max-w-xl">{err}</p>}
               </div>
-              <button
-                type="button"
-                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
-                onClick={() => setPreviewOpen(false)}
-                aria-label="Tutup"
-              >
-                <span className="material-symbols-outlined">close</span>
-              </button>
-            </div>
-
-            <div className="mb-3 rounded-xl border border-cyan-200 dark:border-cyan-900/40 bg-cyan-50/70 dark:bg-cyan-950/20 p-3">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <p className="text-xs uppercase tracking-[0.2em] font-semibold text-cyan-700 dark:text-cyan-300">Analisis kandidat baru (auto)</p>
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  disabled={previewAnalysisLoading || !previewCandidate.trim()}
-                  onClick={() => void runCandidateAnalysis(previewBase, previewCandidate, String(detail?.disease?.name ?? webSearchQuery ?? ''))}
-                  className="px-3 py-1.5 rounded-full text-xs font-medium border border-cyan-200 text-cyan-700 bg-white hover:bg-cyan-600 hover:text-white disabled:opacity-60"
+                  onClick={() => setPreviewAssistantOpen(true)}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium border border-cyan-200 text-cyan-700 bg-cyan-50 hover:bg-cyan-100"
                 >
-                  {previewAnalysisLoading ? 'Menganalisis…' : 'Analisis ulang'}
+                  Buka Asisten Kritik
+                </button>
+                <button
+                  type="button"
+                  className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+                  onClick={() => { setPreviewOpen(false); setPreviewAssistantOpen(false); }}
+                  aria-label="Tutup"
+                >
+                  <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
-
-              {previewAnalysisLoading && (
-                <div className="mt-2 text-sm text-cyan-700 dark:text-cyan-300 inline-flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
-                  Memvalidasi akurasi kandidat terhadap artikel utama...
-                </div>
-              )}
-
-              {previewAnalysisError && !previewAnalysisLoading && (
-                <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{previewAnalysisError}</p>
-              )}
-
-              {previewAnalysis && !previewAnalysisLoading && (
-                <div className="mt-3 space-y-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
-                      previewAnalysis.verdict === 'layak'
-                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                        : previewAnalysis.verdict === 'perlu_revisi'
-                          ? 'bg-amber-50 text-amber-700 border-amber-200'
-                          : 'bg-rose-50 text-rose-700 border-rose-200'
-                    }`}>
-                      Verdict: {previewAnalysis.verdict.replace('_', ' ')}
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-slate-50 text-slate-700 border-slate-200">
-                      Akurasi {previewAnalysis.accuracy_score}%
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-slate-50 text-slate-700 border-slate-200">
-                      Komplemen {previewAnalysis.complementarity_score}%
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-violet-50 text-violet-700 border-violet-200">
-                      Saran merge: {previewAnalysis.merge_strategy}
-                    </span>
-                  </div>
-
-                  <p className="text-sm text-slate-700 dark:text-slate-200">{previewAnalysis.summary}</p>
-
-                  {Array.isArray(previewAnalysis.chat_session) && previewAnalysis.chat_session.length > 0 && (
-                    <div className="space-y-2">
-                      {previewAnalysis.chat_session.map((turn, idx) => (
-                        <div key={idx} className="rounded-xl border border-cyan-100 dark:border-cyan-900/30 bg-white/80 dark:bg-slate-900/60 p-3">
-                          <p className="text-[11px] uppercase tracking-[0.2em] text-cyan-600 dark:text-cyan-300 font-semibold">
-                            {turn.title || 'Analisis'}
-                          </p>
-                          <p className="mt-1 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{turn.content || ''}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {Array.isArray(previewAnalysis.action_points) && previewAnalysis.action_points.length > 0 && (
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/60 p-3">
-                      <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500 font-semibold">Rekomendasi tindakan</p>
-                      <ul className="mt-2 list-disc pl-5 text-sm text-slate-700 dark:text-slate-200 space-y-1">
-                        {previewAnalysis.action_points.map((item, idx) => <li key={idx}>{item}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
+
+            {previewAnalysis && !previewAnalysisLoading && (
+              <div className="mb-3 rounded-xl border border-violet-200 bg-violet-50/60 dark:bg-violet-950/20 dark:border-violet-900/40 p-3 flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-white text-slate-700 border-slate-200">
+                  Verdict: {previewAnalysis.verdict.replace('_', ' ')}
+                </span>
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-white text-slate-700 border-slate-200">
+                  Akurasi {previewAnalysis.accuracy_score}%
+                </span>
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-white text-slate-700 border-slate-200">
+                  Komplemen {previewAnalysis.complementarity_score}%
+                </span>
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-white text-violet-700 border-violet-200">
+                  Merge {previewAnalysis.merge_strategy}
+                </span>
+                <span className="text-xs text-slate-600 dark:text-slate-300">{previewAnalysis.summary}</span>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 flex-1 min-h-0">
               <div className="flex flex-col min-h-0 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
                 <div className="text-xs font-semibold px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600">Artikel utama (saat ini)</div>
-                <div className="overflow-y-auto p-3 max-h-[min(40vh,320px)] lg:max-h-[min(70vh,480px)] prose prose-sm dark:prose-invert max-w-none text-sm">
+                <div className="overflow-y-auto p-3 min-h-[min(56vh,380px)] lg:min-h-[min(64vh,520px)] prose prose-sm dark:prose-invert max-w-none text-sm">
                   {previewBase.trim() ? (
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
                       {previewBase}
@@ -2317,43 +2497,47 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   )}
                 </div>
               </div>
+
               <div className="flex flex-col min-h-0 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
                 <div className="text-xs font-semibold px-3 py-2 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-800 dark:text-indigo-200">
                   Kandidat baru
                 </div>
-                <div className="overflow-y-auto p-3 max-h-[min(40vh,320px)] lg:max-h-[min(70vh,480px)] prose prose-sm dark:prose-invert max-w-none text-sm">
+                <div className="overflow-y-auto p-3 min-h-[min(56vh,380px)] lg:min-h-[min(64vh,520px)] prose prose-sm dark:prose-invert max-w-none text-sm">
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
                     {previewCandidate}
                   </ReactMarkdown>
                 </div>
               </div>
-              <div className="flex flex-col min-h-0 border border-violet-200 dark:border-violet-800 rounded-xl overflow-hidden lg:col-span-1">
-                <div className="text-xs font-semibold px-3 py-2 bg-violet-50 dark:bg-violet-950/40 text-violet-800 dark:text-violet-200 flex flex-wrap items-center justify-between gap-2">
-                  <span>Hasil gabungan (bisa diedit)</span>
-                  <button
-                    type="button"
-                    disabled={mergeAiLoading || !previewCandidate.trim() || busy}
-                    onClick={() => void handleAiMergePreview()}
-                    className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 text-white text-[11px] font-medium hover:bg-violet-700 disabled:opacity-50"
-                    title="Menggabungkan artikel utama dan kandidat dengan Copilot"
-                  >
-                    <span className="material-symbols-outlined text-[14px]">auto_awesome</span>
-                    {mergeAiLoading ? 'Menggabung…' : 'Gabung dengan AI'}
-                  </button>
-                </div>
-                <textarea
-                  value={previewCombinedEdit}
-                  onChange={(e) => setPreviewCombinedEdit(e.target.value)}
-                  className="flex-1 w-full min-h-[min(40vh,280px)] lg:min-h-[min(70vh,440px)] p-3 text-xs font-mono bg-slate-50/80 dark:bg-slate-950/40 border-0 resize-y focus:ring-2 focus:ring-violet-400 outline-none"
-                  spellCheck={false}
-                />
+
+              <div className="flex flex-col min-h-0 border border-violet-200 dark:border-violet-800 rounded-xl overflow-hidden">
+              <div className="text-xs font-semibold px-3 py-2 bg-violet-50 dark:bg-violet-950/40 text-violet-800 dark:text-violet-200 flex flex-wrap items-center justify-between gap-2">
+                <span>Hasil gabungan (bisa diedit)</span>
+                <button
+                  type="button"
+                  disabled={mergeAiLoading || !previewCandidate.trim() || busy}
+                  onClick={() => void handleAiMergePreview()}
+                  className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 text-white text-[11px] font-medium hover:bg-violet-700 disabled:opacity-50"
+                  title="Menggabungkan artikel utama dan kandidat dengan Copilot"
+                >
+                  <span className="material-symbols-outlined text-[14px]">auto_awesome</span>
+                  {mergeAiLoading ? 'Menggabung…' : 'Gabung dengan AI'}
+                </button>
               </div>
+              <textarea
+                value={previewCombinedEdit}
+                onChange={(e) => setPreviewCombinedEdit(e.target.value)}
+                className="flex-1 w-full min-h-[min(56vh,380px)] lg:min-h-[min(64vh,520px)] p-3 text-xs font-mono bg-slate-50/80 dark:bg-slate-950/40 border-0 resize-y focus:ring-2 focus:ring-violet-400 outline-none"
+                spellCheck={false}
+              />
             </div>
+
+            </div>
+
             <p className="text-[10px] text-slate-500 mt-2">
               Gunakan <strong className="font-medium">Gabung dengan AI</strong> untuk menyatukan kolom kiri dan tengah secara detail (Copilot), lalu sunting bila perlu. Perubahan di kolom kanan disimpan ke server saat Anda menekan <strong className="font-medium">Terapkan ke artikel utama</strong>.
             </p>
             <div className="flex justify-end gap-2 mt-4 flex-wrap">
-              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setPreviewOpen(false)}>
+              <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => { setPreviewOpen(false); setPreviewAssistantOpen(false); }}>
                 Batal
               </button>
               <button
@@ -2365,6 +2549,106 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 Terapkan ke artikel utama
               </button>
             </div>
+
+            {previewAssistantOpen && (
+              <div className="fixed inset-0 z-70 bg-black/55 flex items-center justify-center p-4" onClick={() => setPreviewAssistantOpen(false)}>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-4xl w-full p-4 md:p-5 shadow-2xl border border-cyan-200/70 max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <div>
+                      <h4 className="font-headline font-bold text-lg text-slate-800 dark:text-slate-100">Asisten kritik & merge</h4>
+                      <p className="text-xs text-cyan-700 dark:text-cyan-300 mt-1">Tanya kekurangan, kelebihan, konflik, dan strategi merge.</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={previewAnalysisLoading || !previewCandidate.trim()}
+                        onClick={() => void runCandidateAnalysis(previewBase, previewCandidate, String(detail?.disease?.name ?? webSearchQuery ?? ''))}
+                        className="px-3 py-1.5 rounded-full text-xs font-medium border border-cyan-200 text-cyan-700 bg-cyan-50 hover:bg-cyan-100 disabled:opacity-60"
+                      >
+                        {previewAnalysisLoading ? 'Menganalisis…' : 'Analisis ulang'}
+                      </button>
+                      <button type="button" className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => setPreviewAssistantOpen(false)} aria-label="Tutup asisten">
+                        <span className="material-symbols-outlined">close</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto p-3 rounded-xl border border-cyan-100 dark:border-cyan-900/40 bg-cyan-50/30 dark:bg-cyan-950/10 space-y-3">
+                    {previewChatHistory.length === 0 && !previewAnalysisLoading && (
+                      <div className="rounded-2xl border border-dashed border-cyan-200 bg-white/90 p-4 text-sm text-slate-500 leading-relaxed">
+                        Mulai dari pertanyaan seperti: apakah kandidat lebih lengkap, mana bagian yang lemah, dan apa strategi merge paling aman.
+                      </div>
+                    )}
+
+                    {previewChatHistory.map((message, idx) => (
+                      <div key={`${message.role}-${idx}`} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[94%] rounded-2xl px-4 py-3 shadow-sm border ${
+                          message.role === 'user'
+                            ? 'bg-indigo-600 text-white border-indigo-500'
+                            : 'bg-white text-slate-700 border-cyan-100 dark:bg-slate-900 dark:text-slate-200 dark:border-cyan-900/40'
+                        }`}>
+                          <p className={`text-[10px] uppercase tracking-[0.22em] font-semibold mb-1 ${message.role === 'user' ? 'text-indigo-100' : 'text-cyan-600 dark:text-cyan-300'}`}>
+                            {message.role === 'user' ? 'Anda' : (message.title || 'Asisten')}
+                          </p>
+                          <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                        </div>
+                      </div>
+                    ))}
+
+                    {previewAnalysisLoading && (
+                      <div className="flex justify-start">
+                        <div className="rounded-2xl px-4 py-3 border border-cyan-100 dark:border-cyan-900/40 bg-white dark:bg-slate-900 text-sm text-cyan-700 dark:text-cyan-300 inline-flex items-center gap-2">
+                          <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                          Memeriksa kelebihan, kekurangan, dan potensi merge...
+                        </div>
+                      </div>
+                    )}
+
+                    {previewAnalysisError && !previewAnalysisLoading && (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:text-amber-200 dark:bg-amber-950/20">
+                        {previewAnalysisError}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="border-t border-cyan-200/70 dark:border-cyan-900/40 p-3 bg-white/80 dark:bg-slate-950/40 space-y-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      {[
+                        'Apa kekurangan utama kandidat baru?',
+                        'Bagian mana yang lebih kuat dari artikel utama?',
+                        'Kalau di-merge, apa yang harus dipertahankan?',
+                      ].map((prompt) => (
+                        <button
+                          key={prompt}
+                          type="button"
+                          disabled={!previewCandidate.trim() || previewAnalysisLoading}
+                          onClick={() => void submitPreviewChat(prompt)}
+                          className="text-left px-3 py-2 rounded-xl border border-cyan-100 bg-cyan-50/70 hover:bg-cyan-100 text-[11px] text-cyan-700 disabled:opacity-60"
+                        >
+                          {prompt}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <textarea
+                        value={previewChatInput}
+                        onChange={(e) => setPreviewChatInput(e.target.value)}
+                        placeholder="Tulis pertanyaan untuk asisten kritik..."
+                        className="flex-1 min-h-20 rounded-xl border border-cyan-200 dark:border-cyan-900/40 bg-white dark:bg-slate-950/60 px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                      />
+                      <button
+                        type="button"
+                        disabled={previewAnalysisLoading || !previewCandidate.trim() || !previewChatInput.trim()}
+                        onClick={() => void submitPreviewChat()}
+                        className="self-end px-4 py-2.5 rounded-xl bg-cyan-600 text-white text-sm font-medium hover:bg-cyan-700 disabled:opacity-60"
+                      >
+                        Kirim
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3896,10 +4180,10 @@ function AdminPanel() {
             <button onClick={() => setIsSidebarMinimized(!isSidebarMinimized)} className="hidden md:flex p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
               <span className="material-symbols-outlined">{isSidebarMinimized || isTablet ? 'menu' : 'menu_open'}</span>
             </button>
-            <h1 className="text-base md:text-xl lg:text-2xl font-headline font-bold bg-linear-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
+            <h1 className="text-base md:text-xl lg:text-2xl font-headline font-bold bg-linear-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent min-w-0 leading-tight">
               Medical RAG
               {activeView === 'library' && (
-                <span className="hidden md:block text-xs font-normal text-slate-500 mt-0.5">Medical Library</span>
+                <span className={`text-xs font-normal text-slate-500 mt-0.5 ${(isSidebarMinimized || isTablet) ? 'hidden lg:block' : 'hidden md:block'}`}>Medical Library</span>
               )}
             </h1>
           </div>
