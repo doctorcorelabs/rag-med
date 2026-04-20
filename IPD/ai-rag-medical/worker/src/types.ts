@@ -132,6 +132,32 @@ export interface LibraryMergeMarkdownRequest {
   markdown_candidate: string;
 }
 
+export interface SourcePageRecord {
+  id?: number;
+  stase_slug: string;
+  source_name: string;
+  page_no: number;
+  markdown: string;
+  markdown_path?: string;
+  checksum?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BatchUploadPageInput {
+  page_no: number;
+  markdown: string;
+  markdown_path?: string;
+}
+
+export interface BatchUploadRequest {
+  pages: BatchUploadPageInput[];
+  reset_source?: boolean;
+  batch_index?: number;
+  total_batches?: number;
+  source_name?: string;
+}
+
 // ── Library Entities ──────────────────────────────────────────────────────────
 
 export interface StaseRow {

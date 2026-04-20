@@ -1,0 +1,52 @@
+# Migrasi Architektur RAG Indexing ke "Full Cloud" Serverless
+
+Tujuan: Memungkinkan pengguna mengupload *bulk ZIP materi* langsung dari Frontend web production, yang akan dipotong, dianalisis AI (embedder), dan dimasukkan langsung ke Supabase tanpa membebani limit *timeout* dari Cloudflare Worker, dan semuanya terjadi murni tanpa bantuan server Python / PC lokal.
+
+## Ringkasan Alur Kerja (Workflow)
+1. Frontend Web (React) menerima upload file `.zip` dari user.
+2. React mengekstrak ZIP **langsung di browser** dalam hitungan detik menggunakan library `jszip`.
+3. Dari misal 300 file `.md` yang ada di ZIP, React akan mengirimkannya ke Supabase melalui Cloudflare Worker secara **dicicil** (misal 5 file per batch).
+4. Cloudflare Worker akan memiliki *Indexer Logic* baru berbasis TypeScript yang memotong teks, menggunakan **Cloudflare Workers AI (`@cf/baai/bge-base-en-v1.5`)** untuk Embeddings, dan menginput database Supabase.
+5. Tersedia Progress Bar dan fitur "Auto-Resume/Continue" di Web Admin Panel.
+
+---
+
+> [!IMPORTANT]
+> **User Review Required**:
+> Strategi ini **TIDAK MENGGUNAKAN Python di sisi internet**, karena file Python awal kita harus di-compile ke Docker jika dipakai. Dengan re-write Indexer ke tipe TypeScript, kita memiliki kelebihan Serverless Murni gratis (Cloudflare)! Pastikan Anda setuju dengan konversi *Python-to-TypeScript* ini.
+
+## Proposed Changes
+
+### Pustaka Pekerja (Cloudflare Workspace)
+
+#### [NEW] worker/src/indexer.ts
+Membuat porting (terjemahan) dari `medrag/indexer.py` ke TypeScript.
+Sistem ini akan mengandung:
+- `_chunkText()` logic untuk mendeteksi `## Level` heading.
+- Kamus *Regex* medis bawaan seperti "Tatalaksana", "Diagnosis", dll.
+- Logika derivasi `disease_tags` dari Header-nya ("Demam Berdarah"). 
+
+#### [MODIFY] worker/src/index.ts
+Menambahkan endpoint API baru:
+- `POST /admin/stases/:slug/sources/:sourceName/batch_upload`
+- Endpoint akan menerima *Max 5-10 halaman Markdown*, me-*running* `indexer.ts`, menghitung Embeddings via Binding `@cf/` Cloudflare AI, dan menyimpan hasilnya ke Supabase secara asinkron.
+
+### Pustaka Antarmuka (Web Frontend)
+
+#### [MODIFY] frontend/package.json
+- Meng-install library `jszip` (`npm install jszip`).
+
+#### [MODIFY] frontend/src/App.tsx
+- Pada Admin Panel, jika upload mendeteksi mode *Cloud*, ubah Event Listener untuk *unzip in-memory*.
+- Menyediakan UI Progress Bar: `Sedang memproses... Batch 5 dari 20 (25%)`.
+- Jika endpoint Cloudflare membalikkan HTTP Timeout (biasanya >10s) atau error koneksi, beri tombol gantung ("Lanjutkan Sinkronisasi yang Gagal") sehingga browser melanjutkan Loop sisanya.
+
+## Verification Plan
+
+### Manual Verification
+1. Kita jalankan Web Frontend lokal, tapi arahkan URL Endpoint upload ZIP ke Cloudflare Worker Endpoint lokal dengan Wrangler (`npm run dev`).
+2. Masukkan ZIP berukuran minimal 30 page, lalu perhatikan animasi progress bar berjalan dalam pecahan kecil 5 *batch*.
+3. Verifikasi ketersediaan hasil `chunks` yang dibuat oleh TypeScript ini di dalam tabel Postgres Supabase Anda, pastikan vektor nilainya valid.
+
+### Open Questions
+- Apakah tidak masalah jika model Embedding untuk produksi ini kita kunci sepenuhnya pada Cloudflare Workers AI model bawaan `baai/bge-base-en-v1.5`? Ini jauh lebih cepat & gratis di Edge daripada memanggil OpenAI Embedding API (berbayar). Model ini juga yang kita pakai untuk _Similarity Search_ di _worker_ sekarang.

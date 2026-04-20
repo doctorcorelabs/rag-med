@@ -3,6 +3,7 @@
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import type { Env, ChunkRecord, ImageRecord } from "./types";
+import { WORKERS_EMBEDDING_MODEL } from "./indexer";
 import {
   extractDiseaseName,
   extractTopicIntent,
@@ -36,7 +37,7 @@ async function vectorSearch(
 ): Promise<ChunkRecord[]> {
   try {
     // Use Cloudflare Workers AI to generate embedding (replaces sentence-transformers)
-    const embeddingResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+    const embeddingResult = await env.AI.run(WORKERS_EMBEDDING_MODEL, {
       text: [query],
     }) as unknown as { data: number[][] };
     const embedding = embeddingResult.data[0];

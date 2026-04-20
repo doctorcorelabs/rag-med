@@ -1,5 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
+import JSZip from 'jszip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 // @ts-ignore: missing type declarations
@@ -107,6 +108,13 @@ type LibraryPreviewResponse = {
 };
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8010';
+const DEFAULT_UPLOAD_MODE: 'legacy' | 'cloud' =
+  import.meta.env.VITE_UPLOAD_MODE === 'legacy'
+    ? 'legacy'
+    : /workers\.dev|pages\.dev|cloudflare/i.test(API_URL)
+      ? 'cloud'
+      : 'legacy';
+const CLOUD_BATCH_SIZE = 5;
 
 const PLACEHOLDER_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150' fill='%23e2e8f0'%3E%3Crect width='150' height='150'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='12' fill='%2394a3b8'%3ENo Image%3C/text%3E%3C/svg%3E";
 
@@ -135,6 +143,57 @@ function imageItemHasStableRef(img: ImageItem): boolean {
     (img.storage_url || '').trim().length > 0 ||
     (img.image_url || '').trim().length > 0
   );
+}
+
+type CloudUploadPage = {
+  page_no: number;
+  markdown: string;
+  markdown_path: string;
+};
+
+type CloudUploadBatch = {
+  batch_index: number;
+  pages: CloudUploadPage[];
+};
+
+type CloudUploadJob = {
+  source_name: string;
+  stase_slug: string;
+  batches: CloudUploadBatch[];
+  total_pages: number;
+  total_batches: number;
+  next_batch_index: number;
+  started_at: number;
+};
+
+function splitIntoBatches<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    batches.push(items.slice(index, index + size));
+  }
+  return batches;
+}
+
+async function readZipMarkdownPages(file: File): Promise<CloudUploadPage[]> {
+  const zip = await JSZip.loadAsync(file);
+  const pages: CloudUploadPage[] = [];
+
+  const entries = Object.values(zip.files).filter((entry) => {
+    const normalized = entry.name.replace(/\\/g, '/');
+    return /(?:^|\/)page-(\d+)\/markdown\.md$/i.test(normalized);
+  });
+
+  for (const entry of entries) {
+    const normalized = entry.name.replace(/\\/g, '/');
+    const match = normalized.match(/(?:^|\/)page-(\d+)\/markdown\.md$/i);
+    if (!match) continue;
+    const pageNo = parseInt(match[1], 10);
+    const markdown = await entry.async('string');
+    pages.push({ page_no: pageNo, markdown, markdown_path: normalized });
+  }
+
+  pages.sort((a, b) => a.page_no - b.page_no);
+  return pages;
 }
 
 type ActiveView = 'chat' | 'library' | 'kg' | 'analytics' | 'admin';
@@ -883,7 +942,7 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
                         <span className="material-symbols-outlined text-amber-400">image</span>
                       </div>
                     )}
-                    <p className="text-[10px] text-center text-amber-700 font-medium max-w-[7rem] line-clamp-2">{vref.heading}</p>
+                    <p className="text-[10px] text-center text-amber-700 font-medium max-w-28 line-clamp-2">{vref.heading}</p>
                   </div>
                 ))}
               </div>
@@ -1403,7 +1462,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
               </div>
               <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
                 <div
-                  className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500"
+                  className="h-full rounded-full bg-linear-to-r from-indigo-500 to-violet-500 transition-all duration-500"
                   style={{ width: `${Math.min(100, progress.percent)}%` }}
                 />
               </div>
@@ -1583,7 +1642,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   value={extraPrompt}
                   onChange={(e) => setExtraPrompt(e.target.value)}
                   placeholder="Contoh: tekankan diagnosis banding dan red flag..."
-                  className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-transparent px-3 py-2 text-sm min-h-[72px]"
+                  className="w-full rounded-xl border border-slate-200 dark:border-slate-600 bg-transparent px-3 py-2 text-sm min-h-18"
                 />
               </div>
 
@@ -1644,7 +1703,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 </div>
               )}
 
-              <div className="rounded-[2rem] border border-white/40 bg-surface-container-low/50 p-6 md:p-10 glass-border">
+              <div className="rounded-4xl border border-white/40 bg-surface-container-low/50 p-6 md:p-10 glass-border">
                 {detail.markdown ? (
                   <article className="prose-slate prose max-w-none text-on-surface">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
@@ -1668,7 +1727,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
             <textarea
               value={refineText}
               onChange={(e) => setRefineText(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm min-h-[120px]"
+              className="w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm min-h-30"
               placeholder="Contoh: ringkas bagian etiologi, tambahkan tabel dosis..."
             />
             <div className="flex justify-end gap-2 mt-4">
@@ -1690,7 +1749,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
 
       {previewOpen && (
         <div
-          className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 z-60 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
           onClick={() => setPreviewOpen(false)}
         >
           <div
@@ -1779,7 +1838,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
 
       {visualOpen && (
         <div
-          className="fixed inset-0 z-[55] bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 z-55 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
           onClick={() => setVisualOpen(false)}
         >
           <div
@@ -1907,7 +1966,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
             <textarea
               value={editMarkdown}
               onChange={(e) => setEditMarkdown(e.target.value)}
-              className="flex-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm font-mono min-h-[320px] overflow-y-auto"
+              className="flex-1 w-full rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm font-mono min-h-80 overflow-y-auto"
             />
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" className="px-4 py-2 text-sm rounded-full" onClick={() => setEditOpen(false)}>
@@ -2095,6 +2154,8 @@ function AdminPanel() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [uploadMode, setUploadMode] = useState<'legacy' | 'cloud'>(DEFAULT_UPLOAD_MODE);
+  const [cloudUploadJob, setCloudUploadJob] = useState<CloudUploadJob | null>(null);
 
   // Per-page upload state
   const [pageSourceName, setPageSourceName] = useState('');
@@ -2130,6 +2191,99 @@ function AdminPanel() {
 
   useEffect(() => { loadSources(staseSlug); }, [staseSlug]);
 
+  const uploadProgressPercent = cloudUploadJob
+    ? Math.round((cloudUploadJob.next_batch_index / cloudUploadJob.total_batches) * 100)
+    : 0;
+
+  const uploadProgressLabel = cloudUploadJob
+    ? `Sedang memproses... Batch ${Math.min(cloudUploadJob.next_batch_index + 1, cloudUploadJob.total_batches)} dari ${cloudUploadJob.total_batches} (${Math.max(uploadProgressPercent, 0)}%)`
+    : '';
+
+  const runCloudUploadJob = async (job: CloudUploadJob, startBatchIndex = job.next_batch_index) => {
+    setUploading(true);
+    let nextIndex = startBatchIndex;
+
+    try {
+      for (nextIndex = startBatchIndex; nextIndex < job.total_batches; nextIndex += 1) {
+        const batch = job.batches[nextIndex];
+        const progressPercent = Math.round((nextIndex / job.total_batches) * 100);
+        setCloudUploadJob({ ...job, next_batch_index: nextIndex });
+        setUploadMsg(`Sedang memproses... Batch ${nextIndex + 1} dari ${job.total_batches} (${progressPercent}%)`);
+
+        await axios.post(
+          `${API_URL}/admin/stases/${job.stase_slug}/sources/${encodeURIComponent(job.source_name)}/batch_upload`,
+          {
+            pages: batch.pages,
+            reset_source: nextIndex === 0 && startBatchIndex === 0,
+            batch_index: nextIndex,
+            total_batches: job.total_batches,
+            source_name: job.source_name,
+          },
+          { timeout: 15000 },
+        );
+
+        setCloudUploadJob({ ...job, next_batch_index: nextIndex + 1 });
+      }
+
+      setUploadMsg(`✅ ${job.total_pages} halaman berhasil diupload dan diindeks.`);
+      setCloudUploadJob(null);
+      setUploadFile(null);
+      loadSources(job.stase_slug);
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail ?? e?.response?.data?.error ?? e.message;
+      setUploadMsg(`⚠️ Sinkronisasi terhenti di batch ${nextIndex + 1}. ${detail}`);
+      setCloudUploadJob({ ...job, next_batch_index: nextIndex });
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadMsg(null), 7000);
+    }
+  };
+
+  const startCloudUpload = async () => {
+    if (!uploadFile || !uploadSourceName.startsWith('(Sumber) ')) {
+      setUploadMsg('Pilih file ZIP dan nama sumber yang valid');
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const pages = await readZipMarkdownPages(uploadFile);
+      if (pages.length === 0) {
+        throw new Error('ZIP tidak berisi page-*/markdown.md');
+      }
+
+      const batches = splitIntoBatches(pages, CLOUD_BATCH_SIZE).map((batch, index) => ({
+        batch_index: index,
+        pages: batch,
+      }));
+
+      const job: CloudUploadJob = {
+        source_name: uploadSourceName.trim(),
+        stase_slug: staseSlug,
+        batches,
+        total_pages: pages.length,
+        total_batches: batches.length,
+        next_batch_index: 0,
+        started_at: Date.now(),
+      };
+
+      setCloudUploadJob(job);
+      setUploadMsg(`ZIP diproses di browser. Mulai sinkronisasi ${job.total_batches} batch...`);
+      await runCloudUploadJob(job, 0);
+    } catch (e: any) {
+      setUploadMsg(`❌ ${e?.response?.data?.detail ?? e.message}`);
+      setCloudUploadJob(null);
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadMsg(null), 7000);
+    }
+  };
+
+  const resumeCloudUpload = async () => {
+    if (!cloudUploadJob) return;
+    await runCloudUploadJob(cloudUploadJob, cloudUploadJob.next_batch_index);
+  };
+
   const handleCreateSource = async () => {
     if (!newSourceName.startsWith('(Sumber) ') || newSourceName.trim().length < 12) {
       setCreateMsg('Nama harus: (Sumber) XX Nama'); return;
@@ -2146,6 +2300,11 @@ function AdminPanel() {
   };
 
   const handleUploadZip = async () => {
+    if (uploadMode === 'cloud') {
+      await startCloudUpload();
+      return;
+    }
+
     if (!uploadFile || !uploadSourceName.startsWith('(Sumber) ')) {
       setUploadMsg('Pilih file ZIP dan nama sumber yang valid'); return;
     }
@@ -2236,7 +2395,7 @@ function AdminPanel() {
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0 bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-950/20 dark:to-indigo-950/20">
+      <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0 bg-linear-to-r from-violet-50 to-indigo-50 dark:from-violet-950/20 dark:to-indigo-950/20">
         <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
           <span className="material-symbols-outlined text-violet-500">admin_panel_settings</span>
           Admin Panel
@@ -2352,24 +2511,97 @@ function AdminPanel() {
               </div>
 
               {/* Upload ZIP */}
-              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
-                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 mb-3">
-                  <span className="material-symbols-outlined text-[16px] text-violet-500">upload_file</span>
-                  Upload ZIP (Bulk Pages)
-                </h3>
-                <div className="space-y-2">
-                  <input value={uploadSourceName} onChange={e => setUploadSourceName(e.target.value)}
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[16px] text-violet-500">upload_file</span>
+                      Upload ZIP (Bulk Pages)
+                    </h3>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Cloud mode membongkar ZIP di browser lalu mengirim batch 5 halaman per request.
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setUploadMode('legacy')}
+                      className={`px-3 py-1.5 text-xs rounded-lg transition-all ${uploadMode === 'legacy' ? 'bg-white dark:bg-slate-900 text-slate-700 shadow-sm' : 'text-slate-500'}`}
+                    >
+                      Legacy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUploadMode('cloud')}
+                      className={`px-3 py-1.5 text-xs rounded-lg transition-all ${uploadMode === 'cloud' ? 'bg-violet-600 text-white shadow-sm' : 'text-slate-500'}`}
+                    >
+                      Cloud
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <input
+                    value={uploadSourceName}
+                    onChange={e => setUploadSourceName(e.target.value)}
                     placeholder="(Sumber) A3 Nama Buku"
-                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400" />
-                  <input type="file" accept=".zip" onChange={e => setUploadFile(e.target.files?.[0] ?? null)}
-                    className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-violet-50 file:text-violet-700 file:font-medium file:text-xs hover:file:bg-violet-100 cursor-pointer" />
-                  <p className="text-[10px] text-slate-400">Format ZIP: page-1/markdown.md, page-2/markdown.md, ...</p>
-                  <button onClick={handleUploadZip} disabled={uploading || !uploadFile}
-                    className="w-full py-2 bg-violet-600 text-white text-sm font-medium rounded-xl hover:bg-violet-700 transition-all disabled:opacity-60 flex items-center justify-center gap-1.5">
+                    className="w-full text-sm border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 bg-slate-50 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-400"
+                  />
+                  <input
+                    type="file"
+                    accept=".zip"
+                    onChange={e => setUploadFile(e.target.files?.[0] ?? null)}
+                    className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-violet-50 file:text-violet-700 file:font-medium file:text-xs hover:file:bg-violet-100 cursor-pointer"
+                  />
+
+                  {uploadMode === 'cloud' && cloudUploadJob && (
+                    <div className="space-y-2 rounded-2xl border border-violet-100 bg-violet-50/70 p-3 dark:border-violet-900/40 dark:bg-violet-950/20">
+                      <div className="flex items-center justify-between text-xs font-medium text-violet-700 dark:text-violet-300">
+                        <span>{uploadProgressLabel}</span>
+                        <span>{cloudUploadJob.total_pages} halaman</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-violet-100 dark:bg-violet-900/40 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-linear-to-r from-violet-500 via-indigo-500 to-cyan-400 transition-all duration-300"
+                          style={{ width: `${Math.min(uploadProgressPercent, 100)}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-violet-600/80 dark:text-violet-300/70">
+                        <span>Batch size: {CLOUD_BATCH_SIZE}</span>
+                        <span>{cloudUploadJob.next_batch_index}/{cloudUploadJob.total_batches}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleUploadZip}
+                    disabled={uploading || !uploadFile}
+                    className="w-full py-2 bg-violet-600 text-white text-sm font-medium rounded-xl hover:bg-violet-700 transition-all disabled:opacity-60 flex items-center justify-center gap-1.5"
+                  >
                     <span className="material-symbols-outlined text-[15px]">{uploading ? 'sync' : 'cloud_upload'}</span>
-                    {uploading ? 'Mengupload...' : 'Upload & Index Otomatis'}
+                    {uploading
+                      ? (uploadMode === 'cloud' ? 'Menyinkronkan...' : 'Mengupload...')
+                      : (uploadMode === 'cloud' ? 'Upload & Sinkronisasi Batch' : 'Upload & Index Otomatis')}
                   </button>
-                  {uploadMsg && <p className="text-xs font-medium text-center" style={{ color: uploadMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }}>{uploadMsg}</p>}
+
+                  {uploadMode === 'cloud' && cloudUploadJob && !uploading && cloudUploadJob.next_batch_index < cloudUploadJob.total_batches && (
+                    <button
+                      type="button"
+                      onClick={resumeCloudUpload}
+                      className="w-full py-2.5 border border-violet-200 bg-white text-violet-700 text-sm font-medium rounded-xl hover:bg-violet-50 transition-all"
+                    >
+                      Lanjutkan Sinkronisasi yang Gagal
+                    </button>
+                  )}
+
+                  {uploadMsg && (
+                    <p
+                      className="text-xs font-medium text-center leading-relaxed"
+                      style={{ color: uploadMsg.startsWith('✅') ? '#16a34a' : uploadMsg.startsWith('⚠️') ? '#d97706' : '#dc2626' }}
+                    >
+                      {uploadMsg}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -2498,7 +2730,7 @@ function AdminPanel() {
       {/* ── SideNavBar — hidden on mobile, icon-only on tablet, full on desktop ── */}
       <nav className={`fixed left-0 top-0 h-full z-40 flex-col p-4 bg-slate-50/40 dark:bg-slate-950/40 backdrop-blur-2xl transition-all duration-300 ease-in-out ${isSidebarMinimized || isTablet ? 'w-20' : 'w-72'} rounded-r-3xl tonal-layering no-border shadow-[40px_0_60px_-10px_rgba(0,0,0,0.04)] font-[Inter] text-sm hidden md:flex overflow-x-hidden`}>
         <div className="flex items-center gap-3 mb-10 px-2 mt-4">
-          <div className="h-10 w-10 min-w-[2.5rem] rounded-full bg-primary-container flex items-center justify-center shrink-0">
+          <div className="h-10 w-10 min-w-10 rounded-full bg-primary-container flex items-center justify-center shrink-0">
             <span className="material-symbols-outlined text-secondary" style={{ fontVariationSettings: "'FILL' 1" }}>medical_services</span>
           </div>
           <div className={`transition-opacity duration-300 whitespace-nowrap ${isSidebarMinimized || isTablet ? 'opacity-0 pointer-events-none w-0' : 'opacity-100'}`}>
@@ -2570,13 +2802,13 @@ function AdminPanel() {
         <header className="flex justify-between items-center px-3 md:px-8 h-14 md:h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30 shrink-0">
           <div className="flex items-center gap-2 md:gap-4">
             {/* Mobile: app icon; Tablet+Desktop: sidebar toggle */}
-            <div className="md:hidden w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm">
+            <div className="md:hidden w-8 h-8 rounded-full bg-linear-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm">
               <span className="material-symbols-outlined text-white text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>medical_services</span>
             </div>
             <button onClick={() => setIsSidebarMinimized(!isSidebarMinimized)} className="hidden md:flex p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors">
               <span className="material-symbols-outlined">{isSidebarMinimized || isTablet ? 'menu' : 'menu_open'}</span>
             </button>
-            <h1 className="text-base md:text-xl lg:text-2xl font-headline font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
+            <h1 className="text-base md:text-xl lg:text-2xl font-headline font-bold bg-linear-to-r from-indigo-600 to-cyan-600 bg-clip-text text-transparent">
               Medical RAG
               {activeView === 'library' && (
                 <span className="hidden md:block text-xs font-normal text-slate-500 mt-0.5">Medical Library</span>
@@ -2657,7 +2889,7 @@ function AdminPanel() {
                   </>
                 ) : (
                   <>
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm text-white">
+                    <div className="w-8 h-8 rounded-full bg-linear-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm text-white">
                       <span className="material-symbols-outlined text-[18px]" style={{ fontVariationSettings: "'FILL' 1" }}>medical_services</span>
                     </div>
                     <span className="text-xs font-label text-on-surface-variant uppercase tracking-wider">Clinical Assistant</span>
@@ -2791,12 +3023,12 @@ function AdminPanel() {
           {isLoading && (
             <div className="flex flex-col items-start gap-2 w-full max-w-4xl mr-auto mt-6">
               <div className="flex items-center gap-2 mb-1 px-2 opacity-70">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm text-white">
+                <div className="w-8 h-8 rounded-full bg-linear-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0 shadow-sm text-white">
                   <span className="material-symbols-outlined text-[18px] animate-pulse">medical_services</span>
                 </div>
                 <span className="text-xs font-label text-on-surface-variant uppercase tracking-wider">Clinical Assistant</span>
               </div>
-              <div className="bg-surface-container-lowest glass-border glass-panel px-6 py-4 rounded-[2rem] rounded-tl-sm flex items-center gap-3 text-secondary animate-pulse">
+              <div className="bg-surface-container-lowest glass-border glass-panel px-6 py-4 rounded-4xl rounded-tl-sm flex items-center gap-3 text-secondary animate-pulse">
                 <span className="material-symbols-outlined animate-spin" style={{ animationDuration: '1.5s' }}>refresh</span>
                 <span className="text-sm font-medium">Menganalisis dokumen referensi klinis...</span>
               </div>
@@ -2807,7 +3039,7 @@ function AdminPanel() {
         </div>
 
         {/* Floating Input Area */}
-        <div className={`absolute left-0 w-full p-3 md:p-6 lg:p-8 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20 ${isMobile ? 'bottom-[var(--bottom-nav-h)]' : 'bottom-0'}`}>
+        <div className={`absolute left-0 w-full p-3 md:p-6 lg:p-8 bg-linear-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20 ${isMobile ? 'bottom-(--bottom-nav-h)' : 'bottom-0'}`}>
           <div className="w-full max-w-4xl pointer-events-auto">
             {/* Stase selector */}
             <div className="flex items-center gap-2 mb-2 px-1">
@@ -2831,7 +3063,7 @@ function AdminPanel() {
                 </button>
               ))}
             </div>
-            <div className={`bg-surface-container-lowest/80 backdrop-blur-2xl rounded-2xl md:rounded-[2rem] glass-border p-1.5 md:p-2 flex items-end gap-1.5 md:gap-2 ambient-shadow transition-all ${isLoading ? 'opacity-80' : 'shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container'}`}>
+            <div className={`bg-surface-container-lowest/80 backdrop-blur-2xl rounded-2xl md:rounded-4xl glass-border p-1.5 md:p-2 flex items-end gap-1.5 md:gap-2 ambient-shadow transition-all ${isLoading ? 'opacity-80' : 'shadow-[0_-10px_40px_rgba(0,0,0,0.03)] focus-within:ring-2 focus-within:ring-primary-container'}`}>
               <button disabled={isLoading} className="p-2 md:p-3 text-on-surface-variant hover:text-secondary hover:bg-secondary-container/50 rounded-full transition-colors shrink-0 mb-0.5 md:mb-1 hidden md:flex">
                 <span className="material-symbols-outlined">attach_file</span>
               </button>
@@ -2846,7 +3078,7 @@ function AdminPanel() {
                     }
                   }}
                   disabled={isLoading}
-                  className="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-3 md:py-4 px-2 focus:ring-0 font-body text-sm md:text-base max-h-32 min-h-[44px] md:min-h-[56px] block outline-none disabled:opacity-70"
+                  className="w-full bg-transparent border-none text-on-surface placeholder-on-surface-variant/60 resize-none py-3 md:py-4 px-2 focus:ring-0 font-body text-sm md:text-base max-h-32 min-h-11 md:min-h-14 block outline-none disabled:opacity-70"
                   placeholder={isLoading ? 'Memproses...' : (isMobile ? 'Tanya kondisi medis...' : `Tanya seputar kondisi medis ${activeStase.toUpperCase()}, gejala, atau tindak lanjut...`)}
                   rows={1}
                 />
@@ -2872,7 +3104,7 @@ function AdminPanel() {
         {/* ── Evidence Modal ── */}
         {evidenceModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-0 md:p-4" onClick={() => setEvidenceModal(null)}>
-            <div className="bg-surface-container-lowest glass-border glass-panel rounded-t-2xl md:rounded-[2rem] max-w-2xl w-full max-h-[90vh] md:max-h-[85vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-surface-container-lowest glass-border glass-panel rounded-t-2xl md:rounded-4xl max-w-2xl w-full max-h-[90vh] md:max-h-[85vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
               <div className="bottom-sheet-handle md:hidden" />
               <div className="flex justify-between items-center p-4 md:p-6 border-b border-surface-variant/60">
                 <h2 className="text-sm md:text-lg font-headline font-bold text-secondary flex items-center gap-2 min-w-0">

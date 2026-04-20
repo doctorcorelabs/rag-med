@@ -24,6 +24,7 @@ import {
   extractTopicIntent,
   isDetailRequest,
 } from "./medical-vocab";
+import { embedTexts, parsePageForIndexing } from "./indexer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App setup
@@ -98,6 +99,48 @@ const LibraryPatchContentSchema = z.object({
   markdown: z.string().min(1),
   preview_commit: z.boolean().default(false),
 });
+
+const SourceCreateSchema = z.object({
+  source_name: z.string().min(3),
+});
+
+const SourcePageUploadSchema = z.object({
+  page_no: z.number().int().min(1),
+  markdown: z.string().min(1),
+  markdown_path: z.string().optional(),
+});
+
+const BatchUploadPageSchema = z.object({
+  page_no: z.number().int().min(1),
+  markdown: z.string().min(1),
+  markdown_path: z.string().optional(),
+});
+
+const BatchUploadSchema = z.object({
+  pages: z.array(BatchUploadPageSchema).min(1).max(10),
+  reset_source: z.boolean().default(false),
+  batch_index: z.number().int().min(0).default(0),
+  total_batches: z.number().int().min(1).optional(),
+  source_name: z.string().optional(),
+});
+
+type BatchUploadPage = z.infer<typeof BatchUploadPageSchema>;
+
+type StoredSourcePage = {
+  id: number;
+  stase_slug: string;
+  source_name: string;
+  page_no: number;
+  markdown: string;
+  markdown_path: string | null;
+};
+
+type AdminSourceSummary = {
+  source_name: string;
+  page_count: number;
+  chunk_count: number;
+  indexed: boolean;
+};
 
 const MindmapNodeSchema = z.object({
   id: z.string(),
@@ -202,6 +245,304 @@ function embeddedLibraryArticle(raw: unknown): Record<string, unknown> | undefin
   if (Array.isArray(raw)) return raw[0] as Record<string, unknown> | undefined;
   if (typeof raw === "object") return raw as Record<string, unknown>;
   return undefined;
+}
+
+function sourceSummaryKey(sourceName: string): string {
+  return sourceName.trim().toLowerCase();
+}
+
+async function deleteSourceArtifacts(
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName: string,
+  pageNos?: number[],
+): Promise<void> {
+  let chunksQuery = supabase.from("chunks").delete().eq("stase_slug", staseSlug).eq("source_name", sourceName);
+  let imagesQuery = supabase.from("images").delete().eq("stase_slug", staseSlug).eq("source_name", sourceName);
+  let edgesQuery = supabase.from("graph_edges").delete().eq("stase_slug", staseSlug).eq("source_name", sourceName);
+
+  if (pageNos && pageNos.length > 0) {
+    chunksQuery = chunksQuery.in("page_no", pageNos);
+    imagesQuery = imagesQuery.in("page_no", pageNos);
+    edgesQuery = edgesQuery.in("page_no", pageNos);
+  }
+
+  await Promise.all([chunksQuery, imagesQuery, edgesQuery]);
+}
+
+async function clearSourcePages(
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName: string,
+  pageNos?: number[],
+): Promise<void> {
+  let query = supabase.from("source_pages").delete().eq("stase_slug", staseSlug).eq("source_name", sourceName);
+  if (pageNos && pageNos.length > 0) {
+    query = query.in("page_no", pageNos);
+  }
+  await query;
+}
+
+async function persistSourcePages(
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName: string,
+  pages: BatchUploadPage[],
+): Promise<void> {
+  const rows = await Promise.all(
+    pages.map(async (page) => ({
+      stase_slug: staseSlug,
+      source_name: sourceName,
+      page_no: page.page_no,
+      markdown: page.markdown,
+      markdown_path: page.markdown_path ?? `page-${page.page_no}/markdown.md`,
+      checksum: await contentHash(page.markdown),
+      updated_at: new Date().toISOString(),
+    })),
+  );
+
+  await supabase.from("source_pages").upsert(rows, { onConflict: "stase_slug,source_name,page_no" });
+}
+
+async function loadSourcePages(
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName?: string,
+): Promise<StoredSourcePage[]> {
+  let query = supabase
+    .from("source_pages")
+    .select("id, stase_slug, source_name, page_no, markdown, markdown_path")
+    .eq("stase_slug", staseSlug)
+    .order("source_name")
+    .order("page_no");
+
+  if (sourceName) {
+    query = query.eq("source_name", sourceName);
+  }
+
+  const { data, error } = await query;
+  if (error || !data) return [];
+  return (data as StoredSourcePage[]).filter((row) => row.page_no > 0);
+}
+
+async function insertParsedPage(
+  env: Env,
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName: string,
+  page: BatchUploadPage,
+  skipVector = false,
+): Promise<{ chunk_count: number; image_count: number; edge_count: number }> {
+  const parsed = parsePageForIndexing({
+    source_name: sourceName,
+    page_no: page.page_no,
+    markdown: page.markdown,
+    stase_slug: staseSlug,
+    markdown_path: page.markdown_path,
+  });
+
+  await deleteSourceArtifacts(supabase, staseSlug, sourceName, [page.page_no]);
+
+  if (parsed.chunks.length > 0) {
+    const embeddings = skipVector ? [] : await embedTexts(env, parsed.chunks.map((chunk) => `passage: ${chunk.heading}: ${chunk.content}`));
+
+    const chunkRows = parsed.chunks.map((chunk, index) => ({
+      source_name: chunk.source_name,
+      page_no: chunk.page_no,
+      heading: chunk.heading,
+      content: chunk.content,
+      disease_tags: chunk.disease_tags,
+      markdown_path: chunk.markdown_path,
+      checksum: chunk.checksum,
+      section_category: chunk.section_category,
+      parent_heading: chunk.parent_heading,
+      chunk_index: chunk.chunk_index,
+      total_chunks: chunk.total_chunks,
+      heading_level: chunk.heading_level,
+      content_type: chunk.content_type,
+      stase_slug: chunk.stase_slug,
+      embedding: skipVector ? null : embeddings[index] ?? null,
+    }));
+
+    await supabase.from("chunks").insert(chunkRows);
+  }
+
+  if (parsed.images.length > 0) {
+    await supabase.from("images").insert(
+      parsed.images.map((img) => ({
+        source_name: img.source_name,
+        page_no: img.page_no,
+        alt_text: img.alt_text,
+        image_ref: img.image_ref,
+        image_abs_path: img.image_abs_path,
+        heading: img.heading,
+        nearby_text: img.nearby_text,
+        markdown_path: img.markdown_path,
+        checksum: img.checksum,
+        stase_slug: img.stase_slug,
+      })),
+    );
+  }
+
+  if (parsed.graph_edges.length > 0) {
+    await supabase.from("graph_edges").insert(
+      parsed.graph_edges.map((edge) => ({
+        ...edge,
+      })),
+    );
+  }
+
+  await persistSourcePages(supabase, staseSlug, sourceName, [page]);
+
+  return {
+    chunk_count: parsed.chunks.length,
+    image_count: parsed.images.length,
+    edge_count: parsed.graph_edges.length,
+  };
+}
+
+async function rebuildSourceFromStoredPages(
+  env: Env,
+  supabase: ReturnType<typeof getSupabase>,
+  staseSlug: string,
+  sourceName?: string,
+  skipVector = false,
+): Promise<{ source_name: string; pages: number; chunks: number; images: number; graph_edges: number }[]> {
+  const pages = await loadSourcePages(supabase, staseSlug, sourceName);
+  if (pages.length === 0) return [];
+
+  const bySource = new Map<string, StoredSourcePage[]>();
+  for (const page of pages) {
+    const key = page.source_name;
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key)!.push(page);
+  }
+
+  const results: { source_name: string; pages: number; chunks: number; images: number; graph_edges: number }[] = [];
+
+  for (const [currentSource, sourcePages] of bySource.entries()) {
+    const pageNos = sourcePages.map((page) => page.page_no);
+    await deleteSourceArtifacts(supabase, staseSlug, currentSource);
+
+    let totalChunks = 0;
+    let totalImages = 0;
+    let totalEdges = 0;
+
+    for (const page of sourcePages) {
+      const parsed = parsePageForIndexing({
+        source_name: currentSource,
+        page_no: page.page_no,
+        markdown: page.markdown,
+        stase_slug: staseSlug,
+        markdown_path: page.markdown_path ?? undefined,
+      });
+
+      if (parsed.chunks.length > 0) {
+        const embeddings = skipVector ? [] : await embedTexts(env, parsed.chunks.map((chunk) => `passage: ${chunk.heading}: ${chunk.content}`));
+        await supabase.from("chunks").insert(
+          parsed.chunks.map((chunk, index) => ({
+            source_name: chunk.source_name,
+            page_no: chunk.page_no,
+            heading: chunk.heading,
+            content: chunk.content,
+            disease_tags: chunk.disease_tags,
+            markdown_path: chunk.markdown_path,
+            checksum: chunk.checksum,
+            section_category: chunk.section_category,
+            parent_heading: chunk.parent_heading,
+            chunk_index: chunk.chunk_index,
+            total_chunks: chunk.total_chunks,
+            heading_level: chunk.heading_level,
+            content_type: chunk.content_type,
+            stase_slug: chunk.stase_slug,
+            embedding: skipVector ? null : embeddings[index] ?? null,
+          })),
+        );
+      }
+
+      if (parsed.images.length > 0) {
+        await supabase.from("images").insert(
+          parsed.images.map((img) => ({
+            source_name: img.source_name,
+            page_no: img.page_no,
+            alt_text: img.alt_text,
+            image_ref: img.image_ref,
+            image_abs_path: img.image_abs_path,
+            heading: img.heading,
+            nearby_text: img.nearby_text,
+            markdown_path: img.markdown_path,
+            checksum: img.checksum,
+            stase_slug: img.stase_slug,
+          })),
+        );
+      }
+
+      if (parsed.graph_edges.length > 0) {
+        await supabase.from("graph_edges").insert(
+          parsed.graph_edges.map((edge) => ({ ...edge })),
+        );
+      }
+
+      totalChunks += parsed.chunks.length;
+      totalImages += parsed.images.length;
+      totalEdges += parsed.graph_edges.length;
+    }
+
+    results.push({
+      source_name: currentSource,
+      pages: pageNos.length,
+      chunks: totalChunks,
+      images: totalImages,
+      graph_edges: totalEdges,
+    });
+  }
+
+  return results;
+}
+
+async function getAdminSourceSummaries(env: Env, staseSlug: string): Promise<AdminSourceSummary[]> {
+  const supabase = getSupabase(env);
+  const [pageRows, chunkRows] = await Promise.all([
+    supabase.from("source_pages").select("source_name, page_no").eq("stase_slug", staseSlug),
+    supabase.from("chunks").select("source_name, page_no").eq("stase_slug", staseSlug),
+  ]);
+
+  const pageMap = new Map<string, Set<number>>();
+  const chunkCountMap = new Map<string, number>();
+
+  for (const row of (pageRows.data ?? []) as Array<{ source_name: string; page_no: number }>) {
+    const key = sourceSummaryKey(row.source_name);
+    if (!pageMap.has(key)) pageMap.set(key, new Set());
+    pageMap.get(key)!.add(row.page_no);
+  }
+
+  for (const row of (chunkRows.data ?? []) as Array<{ source_name: string; page_no: number }>) {
+    const key = sourceSummaryKey(row.source_name);
+    chunkCountMap.set(key, (chunkCountMap.get(key) ?? 0) + 1);
+  }
+
+  const names = new Map<string, string>();
+  for (const row of (pageRows.data ?? []) as Array<{ source_name: string }>) {
+    names.set(sourceSummaryKey(row.source_name), row.source_name);
+  }
+  for (const row of (chunkRows.data ?? []) as Array<{ source_name: string }>) {
+    if (!names.has(sourceSummaryKey(row.source_name))) {
+      names.set(sourceSummaryKey(row.source_name), row.source_name);
+    }
+  }
+
+  return [...names.entries()]
+    .map(([key, sourceName]) => {
+      const pageCount = [...(pageMap.get(key) ?? new Set())].filter((pageNo) => pageNo > 0).length;
+      const chunkCount = chunkCountMap.get(key) ?? 0;
+      return {
+        source_name: sourceName,
+        page_count: pageCount,
+        chunk_count: chunkCount,
+        indexed: chunkCount > 0,
+      };
+    })
+    .sort((a, b) => a.source_name.localeCompare(b.source_name));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -449,6 +790,173 @@ app.post("/get_related_images", async (c) => {
     })),
     count: images.length,
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN ROUTES: Supabase-backed source management for cloud uploads
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get("/admin/stases", async (c) => {
+  const supabase = getSupabase(c.env);
+  const { data: stases } = await supabase
+    .from("stase")
+    .select(
+      "id, slug, display_name, sort_order, disease_catalog ( id, library_article ( status ) )",
+    )
+    .order("sort_order");
+
+  const enriched = (stases ?? []).map((s: unknown) => {
+    const sr = s as Record<string, unknown>;
+    const diseases = (sr["disease_catalog"] as Array<Record<string, unknown>>) ?? [];
+    const diseaseCount = diseases.length;
+    const filledCount = diseases.filter((d) => {
+      const la = embeddedLibraryArticle(d["library_article"]);
+      const status = la?.["status"] as string;
+      return status === "draft" || status === "published";
+    }).length;
+    return {
+      id: sr["id"],
+      slug: sr["slug"],
+      display_name: sr["display_name"],
+      sort_order: sr["sort_order"],
+      disease_count: diseaseCount,
+      filled_count: filledCount,
+    };
+  });
+
+  return c.json({ stases: enriched });
+});
+
+app.post("/admin/stases", async (c) => {
+  const payload = await parseBody(c, z.object({ slug: z.string().min(2), display_name: z.string().min(2) }));
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const { error } = await supabase.from("stase").upsert(
+    { slug: payload.slug, display_name: payload.display_name, sort_order: 0 },
+    { onConflict: "slug" },
+  );
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json({ ok: true, slug: payload.slug, display_name: payload.display_name });
+});
+
+app.delete("/admin/stases/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  const supabase = getSupabase(c.env);
+  const { error } = await supabase.from("stase").delete().eq("slug", slug);
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json({ ok: true, slug });
+});
+
+app.get("/admin/stases/:slug/sources", async (c) => {
+  const slug = c.req.param("slug");
+  const sources = await getAdminSourceSummaries(c.env, slug);
+  return c.json({ sources });
+});
+
+app.post("/admin/stases/:slug/sources", async (c) => {
+  const slug = c.req.param("slug");
+  const payload = await parseBody(c, SourceCreateSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const sourceName = payload.source_name.trim();
+  const supabase = getSupabase(c.env);
+  await supabase.from("source_pages").upsert(
+    {
+      stase_slug: slug,
+      source_name: sourceName,
+      page_no: 0,
+      markdown: "",
+      markdown_path: "",
+      checksum: await contentHash(`placeholder:${slug}:${sourceName}`),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "stase_slug,source_name,page_no" },
+  );
+
+  return c.json({ ok: true, source_name: sourceName });
+});
+
+app.post("/admin/stases/:slug/sources/:sourceName/pages/:pageNo", async (c) => {
+  const slug = c.req.param("slug");
+  const sourceName = c.req.param("sourceName");
+  const pageNo = parseInt(c.req.param("pageNo"), 10);
+  const payload = await parseBody(c, SourcePageUploadSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const page: BatchUploadPage = {
+    page_no: Number.isFinite(pageNo) && pageNo > 0 ? pageNo : payload.page_no,
+    markdown: payload.markdown,
+    markdown_path: payload.markdown_path,
+  };
+
+  const result = await insertParsedPage(c.env, supabase, slug, sourceName, page);
+  return c.json({ ok: true, source_name: sourceName, ...result });
+});
+
+app.delete("/admin/stases/:slug/sources/:sourceName", async (c) => {
+  const slug = c.req.param("slug");
+  const sourceName = c.req.param("sourceName");
+  const supabase = getSupabase(c.env);
+
+  await Promise.all([
+    clearSourcePages(supabase, slug, sourceName),
+    deleteSourceArtifacts(supabase, slug, sourceName),
+  ]);
+
+  return c.json({ ok: true, deleted: sourceName });
+});
+
+app.post("/admin/stases/:slug/sources/:sourceName/batch_upload", async (c) => {
+  const slug = c.req.param("slug");
+  const sourceName = c.req.param("sourceName");
+  const payload = await parseBody(c, BatchUploadSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const pages = [...payload.pages].sort((a, b) => a.page_no - b.page_no);
+
+  if (payload.reset_source || payload.batch_index === 0) {
+    await Promise.all([
+      clearSourcePages(supabase, slug, sourceName),
+      deleteSourceArtifacts(supabase, slug, sourceName),
+    ]);
+  }
+
+  let chunkCount = 0;
+  let imageCount = 0;
+  let edgeCount = 0;
+  for (const page of pages) {
+    const result = await insertParsedPage(c.env, supabase, slug, sourceName, page);
+    chunkCount += result.chunk_count;
+    imageCount += result.image_count;
+    edgeCount += result.edge_count;
+  }
+
+  return c.json({
+    ok: true,
+    source_name: sourceName,
+    pages_uploaded: pages.length,
+    chunk_count: chunkCount,
+    image_count: imageCount,
+    edge_count: edgeCount,
+    batch_index: payload.batch_index,
+    next_batch_index: payload.batch_index + 1,
+    reset_source: payload.reset_source,
+  });
+});
+
+app.post("/admin/reindex", async (c) => {
+  const slug = c.req.query("slug") ?? undefined;
+  const sourceName = c.req.query("source_name") ?? undefined;
+  const skipVector = (c.req.query("skip_vector") ?? "false").toLowerCase() === "true";
+
+  if (!slug) return c.json({ error: "slug query parameter is required" }, 422);
+
+  const supabase = getSupabase(c.env);
+  const rebuilt = await rebuildSourceFromStoredPages(c.env, supabase, slug, sourceName, skipVector);
+  return c.json({ ok: true, mode: sourceName ? "partial" : "full", rebuilt, skip_vector: skipVector });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
