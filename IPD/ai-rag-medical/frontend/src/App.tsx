@@ -1988,6 +1988,69 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   );
 }
 
+// ─── COLLAPSIBLE SECTION COMPONENT ──────────────────────────────────────────
+function CollapsibleSection({ title, children, icon }: { title: string; children: React.ReactNode; icon: string }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [shouldCollapse, setShouldCollapse] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (contentRef.current) {
+      if (contentRef.current.scrollHeight > 500) {
+        setShouldCollapse(true);
+      } else {
+        setShouldCollapse(false);
+      }
+    }
+  }, [children]);
+
+  return (
+    <div className="group border-b border-slate-50 dark:border-slate-800/50 pb-6 mb-6 last:border-0">
+      <h3 className="font-headline text-base md:text-lg font-bold text-indigo-600 dark:text-indigo-400 mb-4 flex items-center gap-2">
+        <span className="material-symbols-outlined text-indigo-400/60 group-hover:text-indigo-500 transition-colors text-[22px]" style={{ fontVariationSettings: "'FILL' 1" }}>
+          {icon}
+        </span>
+        {title}
+      </h3>
+      
+      <div 
+        ref={contentRef}
+        className={`relative transition-all duration-500 ease-in-out overflow-hidden ${
+          shouldCollapse && !isExpanded ? 'max-h-[400px]' : 'max-h-[none]'
+        }`}
+      >
+        <div className="prose-slate dark:prose-invert text-on-surface text-base leading-relaxed pl-1">
+          {children}
+        </div>
+
+        {shouldCollapse && !isExpanded && (
+          <div className="absolute bottom-0 left-0 right-0 h-32 bg-linear-to-t from-white dark:from-slate-900 to-transparent pointer-events-none flex items-end justify-center pb-2">
+            <button 
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); setIsExpanded(true); }}
+              className="pointer-events-auto flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white rounded-full text-sm font-semibold shadow-lg shadow-indigo-200 dark:shadow-indigo-900/40 hover:bg-indigo-700 transition-all transform hover:scale-105 active:scale-95"
+            >
+              <span className="material-symbols-outlined text-[18px]">expand_more</span>
+              Tampilkan Selengkapnya
+            </button>
+          </div>
+        )}
+      </div>
+
+      {shouldCollapse && isExpanded && (
+        <div className="flex justify-center mt-4">
+          <button 
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setIsExpanded(false); }}
+            className="flex items-center gap-2 px-4 py-2 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 rounded-full text-xs font-semibold hover:bg-indigo-100 transition-all"
+          >
+            <span className="material-symbols-outlined text-[16px]">expand_less</span>
+            Sembunyikan Sebagian
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function App() {
   const [query, setQuery] = useState('');
@@ -2095,25 +2158,19 @@ export default function App() {
     setActiveView('kg');
   };
 
-  // ── Render section content – Ide 2 (Markdown) ──
+  // ─── Render section content ──
   const renderSection = (section: DraftSection, sIdx: number) => {
     const icon = SECTION_ICONS[section.title] || 'article';
-    const content = section.markdown ?? (section.points?.join('\n\n') ?? '');
+    const content = (section.markdown ?? (section.points?.join('\n\n') ?? '')).trim();
+
+    if (!content) return null;
 
     return (
-      <div key={sIdx} className="group">
-        <h3 className="font-headline text-base font-bold text-indigo-600 dark:text-indigo-400 mb-3 flex items-center gap-2">
-          <span className="material-symbols-outlined text-indigo-400/60 group-hover:text-indigo-500 transition-colors text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>
-            {icon}
-          </span>
-          {section.title}
-        </h3>
-        <div className="prose-slate text-on-surface text-base leading-relaxed pl-1">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-            {content}
-          </ReactMarkdown>
-        </div>
-      </div>
+      <CollapsibleSection key={sIdx} title={section.title} icon={icon}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+          {content}
+        </ReactMarkdown>
+      </CollapsibleSection>
     );
   };
 

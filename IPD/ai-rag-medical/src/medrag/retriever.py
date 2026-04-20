@@ -251,6 +251,7 @@ def detect_list_intent(query: str) -> bool:
     return any(kw in q for kw in LIST_INTENT_KEYWORDS)
 
 
+<<<<<<< HEAD
 # Alias used internally and exported for tests
 _is_listing_intent = detect_list_intent
 
@@ -272,6 +273,13 @@ def _resolve_retrieval_mode(
     if ENABLE_EXHAUSTIVE_AUTO_MODE and _is_listing_intent(query):
         return "exhaustive"
     return "relevant"
+=======
+# Heading noise words that are not disease names
+_HEADING_NOISE: set[str] = {
+    "general", "image from page folder", "unknown", "introduction",
+    "pendahuluan", "daftar isi", "referensi", "bibliography", "lampiran",
+}
+>>>>>>> 8f35e3e (daftar)
 
 
 def get_topics_from_db(
@@ -282,6 +290,7 @@ def get_topics_from_db(
     """
     Enumerasi semua heading/topik dari DB, dikelompokkan per sumber.
     Tidak menggunakan BM25/vector — langsung baca metadata chunks.
+    Mengembalikan SELURUH daftar tanpa pemotongan; tidak memanggil LLM.
     """
     database = db_path or DEFAULT_DB_PATH
     conn = sqlite3.connect(database)
@@ -291,7 +300,10 @@ def get_topics_from_db(
         noise_placeholders = ",".join("?" for _ in _HEADING_NOISE)
         where = f"WHERE lower(heading) NOT IN ({noise_placeholders})"
         params.extend(_HEADING_NOISE)
+<<<<<<< HEAD
         
+=======
+>>>>>>> 8f35e3e (daftar)
         if stase_slug:
             where += " AND stase_slug = ?"
             params.append(stase_slug)
@@ -312,7 +324,11 @@ def get_topics_from_db(
         grouped: dict[str, dict] = {}
         for r in rows:
             h = r["heading"].strip()
+<<<<<<< HEAD
             # Filter noise: ignore very short headings, single digits, or pure symbols
+=======
+            # Filer noise: ignore very short headings, single digits, or pure symbols
+>>>>>>> 8f35e3e (daftar)
             if len(h) <= 2 or h.isdigit() or all(not c.isalnum() for c in h):
                 continue
                 
@@ -339,6 +355,53 @@ def get_topics_from_db(
             "sources": sources,
             "total_topics": sum(s["topic_count"] for s in sources),
             "source_count": len(sources),
+        }
+    finally:
+        conn.close()
+
+
+def get_disease_names_from_db(
+    db_path: "Path | None",
+    stase_slug: str | None = None,
+) -> dict:
+    """
+    Enumerasi ringkas: hanya nama sumber unik (= nama penyakit/buku),
+    tanpa memuat semua heading. Lebih ringan untuk tampilan daftar singkat.
+    Mengembalikan SELURUH daftar tanpa pemotongan; tidak memanggil LLM.
+    """
+    database = db_path or DEFAULT_DB_PATH
+    conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        params: list = []
+        where = "WHERE 1=1"
+        if stase_slug:
+            where += " AND stase_slug = ?"
+            params.append(stase_slug)
+
+        rows = conn.execute(
+            f"""
+            SELECT source_name, stase_slug, COUNT(DISTINCT heading) as heading_count
+            FROM chunks
+            {where}
+            GROUP BY source_name, stase_slug
+            ORDER BY source_name
+            """,
+            params,
+        ).fetchall()
+
+        diseases = [
+            {
+                "source_name": r["source_name"],
+                "stase_slug": r["stase_slug"],
+                "heading_count": r["heading_count"],
+            }
+            for r in rows
+        ]
+
+        return {
+            "diseases": diseases,
+            "total": len(diseases),
         }
     finally:
         conn.close()

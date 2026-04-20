@@ -23,6 +23,7 @@ from .retriever import (
 )
 from .copilot_client import (
     ask_copilot_adaptive,
+    ask_copilot_for_pure_list,
     generate_mindmap_from_article,
     merge_two_markdown_articles,
     refine_markdown_with_instruction,
@@ -65,6 +66,7 @@ class SearchDiseaseRequest(BaseModel):
     detail_level: Literal["ringkas", "detail"] = "detail"
     top_k: int = Field(default=8, ge=3, le=20)
     include_images: bool = True
+    stase_slug: str = "ipd"
     chat_history: list[ChatHistoryItem] = Field(default_factory=list)
     # Dynamic retrieval mode
     # "relevant" → focused QA (default), "exhaustive" → listing/catalog mode.
@@ -170,7 +172,12 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:8010",
+            "http://127.0.0.1:8010",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -285,57 +292,70 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         is_exhaustive = mode == "exhaustive"
 
         # ── Cek list intent sebelum semantic search ────────────────────────
-        if is_exhaustive:
-            # Exhaustive mode: use semantic search with higher top_k then build
-            # a deduplicated disease list.  Topics DB is always added for
-            # completeness.
-            topics = get_topics_from_db(database)
+        if detect_list_intent(payload.disease_name) or is_exhaustive:
+            # Extract source filter if any (simple keyword matching)
+            source_keywords = ["atria", "mediko", "pppk", "p3k", "kaplan"]
+            found_filter = None
+            q_lower = payload.disease_name.lower()
+            for kw in source_keywords:
+                if kw in q_lower:
+                    found_filter = kw
+                    break
+                    
+            topics = get_topics_from_db(database, stase_slug=payload.stase_slug, source_filter=found_filter)
+            
+            # --- For Exhaustive Mode: also run semantic search to get disease_list ---
+            raw_disease_list = []
+            if is_exhaustive:
+                evidence = search_chunks(
+                    database,
+                    payload.disease_name,
+                    top_k=payload.top_k,
+                    chat_history=history_dicts if history_dicts else None,
+                    retrieval_mode="exhaustive",
+                )
+                raw_disease_list = extract_disease_list_from_chunks(evidence)
 
-            evidence = search_chunks(
-                database,
-                payload.disease_name,
-                top_k=payload.top_k,
-                chat_history=history_dicts if history_dicts else None,
-                retrieval_mode="exhaustive",
-            )
-
-            # Build disease list from retrieved chunks
-            raw_disease_list = extract_disease_list_from_chunks(evidence)
-
-            # Apply optional pagination / max_items
-            page_size = payload.page_size or 50
-            page = payload.page or 1
-            max_items = payload.max_items
-            total_found = len(raw_disease_list)
-            if max_items:
-                raw_disease_list = raw_disease_list[:max_items]
-
-            start = (page - 1) * page_size
-            paged_list = raw_disease_list[start:start + page_size]
-            returned_count = len(paged_list)
-            is_truncated = (start + returned_count) < len(raw_disease_list)
-
-            # Build a structured answer for list queries
+            # Build simple structured answer for list queries directly from DB
             sections = []
+            total_source_count = len(topics.get("sources", []))
+            total_topic_count = topics.get("total_topics", 0)
+            
             for src in topics.get("sources", []):
                 topics_md = "\n".join(
                     f"{i+1}. **{t['heading']}**"
                     for i, t in enumerate(src.get("topics", []))
                 )
-                sections.append({"title": src["source_name"], "markdown": topics_md})
+                # Use source name as section title directly
+                sections.append({
+                    "title": src["source_name"], 
+                    "markdown": topics_md
+                })
+                
             list_answer: dict[str, Any] = {
-                "disease": "Daftar Topik Knowledge Base",
+                "disease": "Daftar Lengkap Topik Knowledge Base",
                 "sections": sections,
                 "citations": [],
                 "grounded": True,
             }
+            
+            # --- AI Refinement (Optional) ---
             github_token = os.getenv("GITHUB_TOKEN")
             if github_token:
-                from .copilot_client import ask_copilot_for_list
                 try:
-                    list_answer = ask_copilot_for_list(topics, github_token)
-                except Exception:
-                    pass  # fallback ke list_answer manual di atas
+                    # AI will filter noise (like symbols and page numbers) while maintaining completeness
+                    list_answer = ask_copilot_for_pure_list(topics, github_token)
+                except Exception as e:
+                    print(f"[WARN] AI list refinement failed, using raw DB list: {e}")
+
+            # Pagination (if exhaustive and has disease_list)
+            paged_list = []
+            total_found = len(raw_disease_list)
+            page_size = payload.page_size or 50
+            page = payload.page or 1
+            if raw_disease_list:
+                start = (page - 1) * page_size
+                paged_list = raw_disease_list[start:start + page_size]
 
             return {
                 "query": payload.disease_name,
@@ -345,7 +365,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 },
                 "retrieval_mode": mode,
                 "detail_level": payload.detail_level,
-                "evidence_count": len(evidence),
+                "evidence_count": 0,
                 "evidence": [],
                 "draft_answer": list_answer,
                 "images": [],
@@ -355,10 +375,10 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "page": page,
                     "page_size": page_size,
                     "total_found": total_found,
-                    "returned_count": returned_count,
-                    "is_truncated": is_truncated,
+                    "returned_count": len(paged_list),
+                    "is_truncated": (page * page_size) < total_found,
                 },
-                "note": "Query terdeteksi sebagai permintaan daftar; mengembalikan enumerasi dari knowledge base.",
+                "note": "Output disaring menggunakan AI untuk menampilkan hanya entitas penyakit murni.",
             }
 
         detected_disease = _extract_disease_name(payload.disease_name)
@@ -767,8 +787,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 to_image_url,
             )
             evidence = gen["evidence"]
-            evidence_with_urls = _enrich_evidence_with_urls(evidence)
             answer = gen["draft_answer"]
+            markdown_content = gen["markdown_candidate"]
             images = gen["images"]
 
             status = "published"
@@ -777,29 +797,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             if isinstance(answer, dict) and answer.get("grounded") is False:
                 status = "draft"
 
-            ad = library_mod.article_dir(slug, bundle["catalog_no"])
-            prev_meta = ad / "meta.json"
-            ver = 1
-            if prev_meta.is_file():
-                try:
-                    old = json.loads(prev_meta.read_text(encoding="utf-8"))
-                    ver = int(old.get("version", 0)) + 1
-                except Exception:
-                    ver = 1
-            md_path, meta_path, meta = write_article_files(
-                slug,
-                bundle["catalog_no"],
-                disease_name,
-                answer,
-                images,
-                {
-                    "extra_prompt": payload.extra_prompt,
-                    "last_operation": "generate",
-                    "version": ver,
-                },
-            )
+            write_article_files(slug, bundle["catalog_no"], markdown_content, images, {
+                "extra_prompt": payload.extra_prompt,
+                "last_operation": "generate",
+                "disease_name": disease_name,
+            })
 
-            ch = content_hash(Path(md_path).read_text(encoding="utf-8"))
+            ad = library_mod.article_dir(slug, bundle["catalog_no"])
+            md_path = ad / "content.md"
+            meta_path = ad / "meta.json"
+            ch = content_hash(markdown_content)
             update_library_article_row(
                 conn,
                 catalog_id,
@@ -809,275 +816,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 ch,
             )
             conn.commit()
+
             return {
                 "ok": True,
+                "disease": disease_name,
                 "status": status,
-                "draft_answer": answer,
+                "markdown": markdown_content,
                 "evidence_count": len(evidence),
-                "evidence": evidence_with_urls,
-                "content_path": str(md_path),
-                "meta": meta,
-                "images": images,
             }
         finally:
             conn.close()
-
-    @app.post("/library/stases/{slug}/diseases/{catalog_id}/refine")
-    def library_refine(slug: str, catalog_id: int, payload: LibraryRefineRequest) -> dict[str, Any]:
-        github_token = os.getenv("GITHUB_TOKEN")
-        if not github_token:
-            raise HTTPException(status_code=503, detail="GITHUB_TOKEN required for refine")
-        conn = library_mod._connect()
-        try:
-            library_mod.init_library_schema(conn)
-            bundle = get_disease_bundle(conn, slug, catalog_id)
-            if not bundle:
-                raise HTTPException(status_code=404, detail="Disease not found")
-            cp = bundle.get("content_path")
-            if not cp or not Path(cp).is_file():
-                raise HTTPException(status_code=400, detail="No article to refine; generate first")
-            md = Path(cp).read_text(encoding="utf-8")
-            new_md = refine_markdown_with_instruction(md, payload.instruction, github_token)
-            Path(cp).write_text(new_md, encoding="utf-8")
-            ad = library_mod.article_dir(slug, bundle["catalog_no"])
-            meta_path = ad / "meta.json"
-            meta = update_article_meta(
-                meta_path,
-                {
-                    "last_refine_instruction": payload.instruction,
-                    "last_operation": "refine",
-                },
-            )
-            hook = maybe_index_article_for_rag(Path(cp), meta)
-            meta.update({k: hook[k] for k in ("indexed_into_rag", "indexed_checksum", "content_checksum") if k in hook})
-            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            ch = content_hash(new_md)
-            update_library_article_row(
-                conn,
-                catalog_id,
-                "published",
-                str(cp),
-                str(meta_path),
-                ch,
-            )
-            conn.commit()
-            return {"ok": True, "markdown": new_md, "meta": meta}
-        finally:
-            conn.close()
-
-    @app.patch("/library/stases/{slug}/diseases/{catalog_id}/content")
-    def library_patch_content(slug: str, catalog_id: int, payload: LibraryPatchContentRequest) -> dict[str, Any]:
-        conn = library_mod._connect()
-        try:
-            library_mod.init_library_schema(conn)
-            bundle = get_disease_bundle(conn, slug, catalog_id)
-            if not bundle:
-                raise HTTPException(status_code=404, detail="Disease not found")
-            ad = library_mod.article_dir(slug, bundle["catalog_no"])
-            ad.mkdir(parents=True, exist_ok=True)
-            md_path = ad / "content.md"
-            meta_path = ad / "meta.json"
-            md_path.write_text(payload.markdown, encoding="utf-8")
-            meta: dict[str, Any] = {}
-            if meta_path.is_file():
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            meta["last_operation"] = "preview_commit" if payload.preview_commit else "manual_edit"
-            meta["updated_at"] = library_mod._utc_now_iso()
-            hook = maybe_index_article_for_rag(md_path, meta)
-            meta.update({k: hook[k] for k in ("indexed_into_rag", "indexed_checksum", "content_checksum") if k in hook})
-            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            ch = content_hash(payload.markdown)
-            update_library_article_row(
-                conn,
-                catalog_id,
-                "published",
-                str(md_path),
-                str(meta_path),
-                ch,
-            )
-            conn.commit()
-            return {"ok": True, "content_path": str(md_path), "meta": meta}
-        finally:
-            conn.close()
-
-    @app.patch("/library/stases/{slug}/diseases/{catalog_id}/visual_refs")
-    def library_update_visual_refs(slug: str, catalog_id: int, payload: LibraryUpdateVisualRefsRequest) -> dict[str, Any]:
-        """Replace visual references stored in meta.json for this article."""
-        conn = library_mod._connect()
-        try:
-            library_mod.init_library_schema(conn)
-            bundle = get_disease_bundle(conn, slug, catalog_id)
-            if not bundle:
-                raise HTTPException(status_code=404, detail="Disease not found")
-            ad = library_mod.article_dir(slug, bundle["catalog_no"])
-            ad.mkdir(parents=True, exist_ok=True)
-            meta_path = ad / "meta.json"
-            meta: dict[str, Any] = {}
-            if meta_path.is_file():
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-
-            meta["images"] = [img.model_dump() for img in payload.images]
-            meta["last_operation"] = "update_visual_refs"
-            meta["updated_at"] = library_mod._utc_now_iso()
-            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-            images_out = _library_images_from_meta(meta)
-            conn.commit()
-            return {"ok": True, "images": images_out, "count": len(images_out), "meta": meta}
-        finally:
-            conn.close()
-
-    @app.delete("/library/stases/{slug}/diseases/{catalog_id}/article")
-    def library_delete_article(slug: str, catalog_id: int) -> dict[str, Any]:
-        conn = library_mod._connect()
-        try:
-            library_mod.init_library_schema(conn)
-            bundle = get_disease_bundle(conn, slug, catalog_id)
-            if not bundle:
-                raise HTTPException(status_code=404, detail="Disease not found")
-            clear_library_article(conn, catalog_id, slug, bundle["catalog_no"])
-            conn.commit()
-            return {"ok": True}
-        finally:
-            conn.close()
-
-    # ══ Admin: Source Manager ══════════════════════════════════════════════════════════════════════
-
-    @app.get("/admin/stases/{slug}/sources")
-    def admin_list_sources(slug: str) -> dict:
-        """List semua folder sumber di Materi/ untuk stase ini + index status."""
-        try:
-            sources = list_sources(slug)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
-        return {"slug": slug, "sources": sources, "count": len(sources)}
-
-    @app.get("/admin/stases/{slug}/sources/{source_name}")
-    def admin_get_source_tree(slug: str, source_name: str) -> dict:
-        """Detail tree satu sumber: semua page + file yang ada."""
-        try:
-            return get_source_tree(slug, source_name)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-    @app.get("/admin/stases/{slug}/sources/{source_name}/pages/{page_no}")
-    def admin_get_page(slug: str, source_name: str, page_no: int) -> dict:
-        """Baca konten markdown satu halaman."""
-        content = get_page_content(slug, source_name, page_no)
-        if content is None:
-            raise HTTPException(status_code=404, detail=f"Halaman {page_no} tidak ditemukan")
-        return {"page_no": page_no, "markdown": content, "chars": len(content)}
-
-    @app.post("/admin/stases/{slug}/sources")
-    def admin_create_source(slug: str, payload: CreateSourceRequest) -> dict:
-        """Buat folder sumber baru dengan template page-1/markdown.md."""
-        try:
-            result = create_source(slug, payload.source_name)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        return {"ok": True, **result}
-
-    @app.post("/admin/stases/{slug}/sources/{source_name}/pages/{page_no}")
-    def admin_upload_page(
-        slug: str, source_name: str, page_no: int, payload: UploadPageRequest,
-    ) -> dict:
-        """Upload / update konten markdown satu halaman tertentu."""
-        try:
-            result = sm_upload_page(slug, source_name, page_no, payload.markdown)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
-        return {"ok": True, **result}
-
-    @app.post("/admin/stases/{slug}/sources/{source_name}/upload_zip")
-    async def admin_upload_zip(
-        slug: str,
-        source_name: str,
-        background_tasks: BackgroundTasks,
-        file: UploadFile = File(...),
-    ) -> dict:
-        """Upload ZIP berisi batch pages. Auto-trigger partial re-index."""
-        content = await file.read()
-        try:
-            result = upload_zip(slug, source_name, content)
-        except (ValueError, FileNotFoundError) as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        background_tasks.add_task(
-            _run_partial_reindex_bg, slug, source_name
-        )
-        return {"ok": True, **result, "reindex_queued": True}
-
-    @app.delete("/admin/stases/{slug}/sources/{source_name}")
-    def admin_delete_source(slug: str, source_name: str) -> dict:
-        """Hapus folder sumber beserta isinya (tidak bisa dibatalkan)."""
-        try:
-            delete_source(slug, source_name)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        return {"ok": True, "deleted": source_name}
-
-    @app.post("/admin/reindex")
-    def admin_trigger_reindex(
-        background_tasks: BackgroundTasks,
-        slug: str | None = None,
-        source_name: str | None = None,
-        skip_vector: bool = True,
-    ) -> dict:
-        """
-        Trigger rebuild index:
-        - Tanpa params → full rebuild semua sumber
-        - ?slug=X → rebuild semua sumber di stase X
-        - ?slug=X&source_name=Y → partial rebuild satu sumber
-        """
-        from fastapi import BackgroundTasks
-        if source_name and slug:
-            background_tasks.add_task(
-                _run_partial_reindex_bg, slug, source_name
-            )
-            return {"ok": True, "mode": "partial", "target": source_name, "reindex_queued": True}
-        else:
-            background_tasks.add_task(_run_full_reindex_bg, skip_vector)
-            return {"ok": True, "mode": "full", "reindex_queued": True}
-
-    def _run_partial_reindex_bg(slug: str, source_name: str) -> None:
-        try:
-            result = build_index_for_source(
-                source_name, slug, DEFAULT_WORKSPACE_ROOT, database
-            )
-            print(f"[Admin ReIndex] {source_name}: {result}")
-        except Exception as e:
-            print(f"[Admin ReIndex ERROR] {source_name}: {e}")
-
-    def _run_full_reindex_bg(skip_vector: bool) -> None:
-        try:
-            result = build_index(db_path=database, skip_vector=skip_vector)
-            print(f"[Admin ReIndex Full]: {result}")
-        except Exception as e:
-            print(f"[Admin ReIndex Full ERROR]: {e}")
-
-    # ══ Admin: Stase Manager ══════════════════════════════════════════════════════════════════════
-
-    @app.get("/admin/stases")
-    def admin_list_stases() -> dict:
-        """List semua stase (hardcoded + stase_overrides.json)."""
-        return {"stases": list_all_stases()}
-
-    @app.post("/admin/stases")
-    def admin_create_stase(payload: CreateStaseRequest) -> dict:
-        """Buat stase baru: folder, CSV placeholder, register DB + overrides.json."""
-        try:
-            result = create_stase(payload.slug, payload.display_name)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        return {"ok": True, **result}
-
-    @app.delete("/admin/stases/{slug}")
-    def admin_delete_stase(slug: str) -> dict:
-        """Hapus stase dari registry. TIDAK menghapus folder materi."""
-        try:
-            delete_stase(slug)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        return {"ok": True, "deleted": slug}
 
     return app
 

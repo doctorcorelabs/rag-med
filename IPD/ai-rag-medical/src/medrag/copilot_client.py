@@ -264,6 +264,7 @@ def _call_copilot(
         "model": "gpt-4.1",
         "temperature": 0.1,
         "stream": False,
+        "max_tokens": 4096,  # Ensure long answers aren't cut off
     }
 
     data = json.dumps(body).encode('utf-8')
@@ -777,24 +778,80 @@ Tulis SATU artikel Markdown lengkap hasil penggabungan kedua bagian di atas."""
     return text.strip()
 
 
-def ask_copilot_for_list(
+def ask_copilot_for_pure_list(
     topics_data: dict[str, Any],
     github_token: str,
 ) -> dict[str, Any]:
     """
+    Menggunakan AI untuk menyaring daftar mentah dari DB menjadi daftar 'Murni Penyakit'.
+    Fokus: Menghapus heading sampah, simbol, atau judul prosedural.
+    """
+    if not github_token:
+        raise ValueError("GITHUB_TOKEN is missing")
+
+    # Siapkan data mentah seminimal mungkin untuk hemat token
+    raw_list = ""
+    for src in topics_data.get("sources", []):
+        raw_list += f"\nSOURCE: {src['source_name']}\n"
+        for t in src.get("topics", []):
+            raw_list += f"- {t['heading']}\n"
+
+    system_prompt = """Anda adalah ahli rekam medis. Tugas Anda adalah MEMBERSIHKAN daftar topik medis.
+ATURAN KETAT:
+1. Hanya simpan item yang merupakan NAMA PENYAKIT, KONDISI KLINIS, atau TOPIK MEDIS UTAMA.
+2. HAPUS: angka saja, simbol (#, $, dll), judul bab umum (Pendahuluan, Daftar Isi, Lampiran), atau instruksi (misal: '1 Jam Pasca...').
+3. JANGAN meringkas daftar. Tampilkan SEMUA yang valid.
+4. Output harus JSON valid sesuai format.
+
+FORMAT OUTPUT:
+{
+  "disease": "Daftar Murni Penyakit & Kondisi Medis",
+  "sections": [
+    {
+      "title": "Nama Sumber",
+      "markdown": "1. **Nama Penyakit A**\\n2. **Nama Penyakit B**..."
+    }
+  ],
+  "citations": []
+}"""
+
+    copilot_token = get_copilot_token(github_token)
+    messages = [
+      {"role": "system", "content": system_prompt},
+      {"role": "user", "content": f"Saring daftar mentah berikut menjadi murni nama penyakit:\n{raw_list}"}
+    ]
+
+    try:
+        raw = _call_copilot(copilot_token, messages)
+        result = _parse_json_response(raw)
+        result["grounded"] = True
+        return result
+    except Exception as e:
+        print(f"[ERROR] ask_copilot_for_pure_list: {e}")
+        raise e
+
+def ask_copilot_for_list(
+    topics_data: dict[str, Any],
+    github_token: str,
+    max_topics_per_source: int = 50,
+) -> dict[str, Any]:
+    """
     Format khusus untuk query enumeratif (daftar penyakit/topik).
     Output: JSON dengan sections berisi numbered list per sumber.
-    Fallback ke format manual jika Copilot gagal.
+    Fallback ke format manual jika Copilot gagal atau data terlalu besar.
     """
     if not github_token:
         raise ValueError("GITHUB_TOKEN is missing or empty")
 
-    # Build sources text
+    # Build sources text with limits to prevent context overflow
     sources_text = ""
     for src in topics_data.get("sources", []):
         sources_text += f"\n### {src['source_name']}\n"
-        for t in src.get("topics", []):
+        topics = src.get("topics", [])
+        for t in topics[:max_topics_per_source]:
             sources_text += f"- {t['heading']}\n"
+        if len(topics) > max_topics_per_source:
+            sources_text += f"- ... (dan {len(topics) - max_topics_per_source} topik lainnya)\n"
 
     system_prompt = """Anda adalah asisten medical RAG. Berikan daftar lengkap topik/penyakit yang tersedia dalam knowledge base.
 
