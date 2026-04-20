@@ -199,6 +199,7 @@ const ConversationNoteCreateSchema = z.object({
   stase_slug: z.string().optional().default("ipd"),
   session_id: z.string().min(6),
   query: z.string().min(2),
+  catalog_id: z.number().int().min(1).nullable().optional(),
   note_title: z.string().optional(),
   note_summary: z.string().optional().nullable(),
   disease_name: z.string().optional().nullable(),
@@ -1381,7 +1382,34 @@ app.post("/conversation_notes", async (c) => {
   };
   const diseaseName = (payload.disease_name ?? payload.query).trim() || null;
   const candidates = await findDiseaseMatches(supabase, staseSlug, diseaseName ?? payload.query);
-  const noteStatus = candidates.length > 0 ? "ready_to_promote" : "saved";
+  let selectedCatalogId: number | null = payload.catalog_id ?? null;
+
+  if (selectedCatalogId) {
+    const { data: stase } = await supabase.from("stase").select("id").eq("slug", staseSlug).single();
+    if (!stase) return c.json({ error: "Stase not found" }, 404);
+    const staseId = (stase as Record<string, unknown>)["id"] as number;
+    const { data: selectedDisease } = await supabase
+      .from("disease_catalog")
+      .select("id, name, stable_key")
+      .eq("id", selectedCatalogId)
+      .eq("stase_id", staseId)
+      .maybeSingle();
+    if (!selectedDisease) {
+      return c.json({ error: "Selected catalog_id not found in stase" }, 409);
+    }
+    const selected = selectedDisease as Record<string, unknown>;
+    const alreadyInCandidates = candidates.some((cand) => cand.catalog_id === selectedCatalogId);
+    if (!alreadyInCandidates) {
+      candidates.unshift({
+        catalog_id: selectedCatalogId,
+        name: String(selected["name"] ?? ""),
+        stable_key: String(selected["stable_key"] ?? ""),
+        score: 1,
+      });
+    }
+  }
+
+  const noteStatus = selectedCatalogId || candidates.length > 0 ? "ready_to_promote" : "saved";
 
   const insertPayload = {
     stase_slug: staseSlug,
@@ -1396,7 +1424,7 @@ app.post("/conversation_notes", async (c) => {
     citation_quality: citationQuality,
     retrieval_metadata: retrievalMetadata,
     note_status: noteStatus,
-    library_catalog_id: null,
+    library_catalog_id: selectedCatalogId,
     match_candidates: candidates,
     updated_at: new Date().toISOString(),
   };

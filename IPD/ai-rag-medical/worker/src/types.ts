@@ -205,6 +205,7 @@ export interface ConversationNoteCreateRequest {
   stase_slug?: string;
   session_id: string;
   query: string;
+  catalog_id?: number | null;
   note_title?: string;
   note_summary?: string | null;
   disease_name?: string | null;
