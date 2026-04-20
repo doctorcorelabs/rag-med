@@ -461,7 +461,10 @@ const NAV_ITEMS: { icon: string; label: string; id: ActiveView }[] = [
 
 function MobileBottomNav({ activeView, onChangeView }: { activeView: ActiveView; onChangeView: (v: ActiveView) => void }) {
   return (
-    <nav className="mobile-bottom-nav fixed bottom-0 left-0 right-0 z-40 flex items-stretch md:hidden">
+    <nav
+      className="mobile-bottom-nav fixed bottom-0 left-0 right-0 z-40 flex items-stretch md:hidden bg-white/95 dark:bg-slate-950/95 backdrop-blur-2xl border-t border-slate-200/70 dark:border-slate-800 shadow-[0_-10px_30px_rgba(15,23,42,0.08)]"
+      style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 0.35rem)' }}
+    >
       {NAV_ITEMS.map((item) => {
         const active = activeView === item.id;
         return (
@@ -469,7 +472,7 @@ function MobileBottomNav({ activeView, onChangeView }: { activeView: ActiveView;
             key={item.id}
             type="button"
             onClick={() => onChangeView(item.id)}
-            className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+            className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 pt-2.5 pb-2 transition-colors ${
               active ? 'text-indigo-600' : 'text-slate-400'
             }`}
           >
@@ -741,6 +744,7 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
   const [showVisuals, setShowVisuals] = useState(false);
   const [graphKey, setGraphKey] = useState(0);
   const [kgListOpen, setKgListOpen] = useState(false); // mobile: togglable list
+  const [kgListCollapsed, setKgListCollapsed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const graphPanelRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
@@ -1001,67 +1005,89 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
       <div className={`${
         kgMobile
           ? (kgListOpen ? 'flex flex-col max-h-[50vh] border-b border-slate-200 dark:border-slate-700' : 'hidden')
-          : 'w-56 lg:w-72 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800'
-      } bg-slate-50/60 dark:bg-slate-900/60`}>
-        <div className={`p-3 md:p-4 border-b border-slate-100 dark:border-slate-800 ${kgMobile ? '' : ''}`}>
-          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-1.5">Stase</p>
-          <select
-            value={staseSlug}
-            onChange={(e) => { setStaseSlug(e.target.value); setSelectedId(null); setLocalMindmap(null); }}
-            className="w-full text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-          >
-            {stases.map((s) => <option key={s.slug} value={s.slug}>{s.display_name}</option>)}
-            {stases.length === 0 && <option value="ipd">Stase IPD</option>}
-          </select>
-        </div>
-        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800">
-          <div className="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2">
-            <span className="material-symbols-outlined text-slate-400 text-[16px]">search</span>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari penyakit..."
-              className="flex-1 text-sm bg-transparent text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none" />
+          : kgListCollapsed ? 'w-18 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800' : 'w-56 lg:w-72 shrink-0 flex flex-col border-r border-slate-100 dark:border-slate-800'
+      } bg-slate-50/60 dark:bg-slate-900/60 transition-all duration-300 overflow-hidden`}>
+        <div className="p-3 md:p-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className={`text-[10px] font-semibold text-slate-400 uppercase tracking-widest ${kgListCollapsed && !kgMobile ? 'md:hidden' : ''}`}>Stase</p>
+            {!kgMobile && (
+              <button
+                type="button"
+                onClick={() => setKgListCollapsed((prev) => !prev)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-white/70 dark:hover:bg-slate-800/70"
+                title={kgListCollapsed ? 'Perbesar daftar' : 'Minimize daftar'}
+              >
+                <span className="material-symbols-outlined text-[18px]">{kgListCollapsed ? 'chevron_right' : 'chevron_left'}</span>
+              </button>
+            )}
           </div>
+          {!kgListCollapsed && (
+            <select
+              value={staseSlug}
+              onChange={(e) => { setStaseSlug(e.target.value); setSelectedId(null); setLocalMindmap(null); }}
+              className="w-full text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            >
+              {stases.map((s) => <option key={s.slug} value={s.slug}>{s.display_name}</option>)}
+              {stases.length === 0 && <option value="ipd">Stase IPD</option>}
+            </select>
+          )}
         </div>
-        <div className="flex-1 overflow-y-auto py-2">
-          {loadingList ? (
-            <div className="flex items-center justify-center h-20">
-              <div className="w-5 h-5 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
+        {!kgListCollapsed && (
+          <>
+            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2">
+                <span className="material-symbols-outlined text-slate-400 text-[16px]">search</span>
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari penyakit..."
+                  className="flex-1 text-sm bg-transparent text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none" />
+              </div>
             </div>
-          ) : Array.from(grouped.entries()).map(([group, rows]) => (
-            <div key={group} className="mb-1">
-              <p className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest">{group}</p>
-              {rows.map((d) => {
-                const hasArticle = d.status && d.status !== 'missing';
-                const isSelected = selectedId === d.id;
-                const hasMindmap = isSelected && localMindmap && !localMindmap.not_generated && localMindmap.nodes.length > 0;
-                return (
-                  <button key={d.id} onClick={() => handleSelectDisease(d)} disabled={!hasArticle}
-                    className={`w-full text-left px-4 py-2.5 flex items-center gap-2.5 transition-all ${
-                      isSelected ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
-                      : hasArticle ? 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800/50'
-                      : 'text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
-                    }`}
-                  >
-                    <span className={`shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${isSelected ? 'border-indigo-500 bg-indigo-500' : hasArticle ? 'border-slate-300' : 'border-slate-200'}`}>
-                      {isSelected && <span className="w-1.5 h-1.5 bg-white rounded-full" />}
-                    </span>
-                    <span className="flex-1 text-xs leading-snug line-clamp-2">
-                      <span className="text-slate-400 mr-1">#{d.catalog_no}</span>{d.name}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {hasMindmap && <span className="material-symbols-outlined text-[11px] text-indigo-400" title="Mindmap tersedia">account_tree</span>}
-                      {d.competency_level && (
-                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                          d.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
-                          d.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
-                        }`}>{d.competency_level}</span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
+            <div className="flex-1 overflow-y-auto py-2">
+              {loadingList ? (
+                <div className="flex items-center justify-center h-20">
+                  <div className="w-5 h-5 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
+                </div>
+              ) : Array.from(grouped.entries()).map(([group, rows]) => (
+                <div key={group} className="mb-1">
+                  <p className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest">{group}</p>
+                  {rows.map((d) => {
+                    const hasArticle = d.status && d.status !== 'missing';
+                    const isSelected = selectedId === d.id;
+                    const hasMindmap = isSelected && localMindmap && !localMindmap.not_generated && localMindmap.nodes.length > 0;
+                    return (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => handleSelectDisease(d)}
+                        disabled={!hasArticle}
+                        className={`w-full text-left px-4 py-2.5 flex items-center gap-2.5 transition-all ${
+                          isSelected ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
+                          : hasArticle ? 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800/50'
+                          : 'text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
+                        }`}
+                      >
+                        <span className={`shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${isSelected ? 'border-indigo-500 bg-indigo-500' : hasArticle ? 'border-slate-300' : 'border-slate-200'}`}>
+                          {isSelected && <span className="w-1.5 h-1.5 bg-white rounded-full" />}
+                        </span>
+                        <span className="flex-1 text-xs leading-snug line-clamp-2">
+                          <span className="text-slate-400 mr-1">#{d.catalog_no}</span>{d.name}
+                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {hasMindmap && <span className="material-symbols-outlined text-[11px] text-indigo-400" title="Mindmap tersedia">account_tree</span>}
+                          {d.competency_level && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                              d.competency_level === '4' ? 'bg-emerald-100 text-emerald-700' :
+                              d.competency_level?.startsWith('3') ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-500'
+                            }`}>{d.competency_level}</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </div>
 
       {/* ── Right: Mindmap Canvas ── */}
@@ -1136,6 +1162,17 @@ function KnowledgeGraphPanel({ initialDisease, onDismissInitial }: { initialDise
                     {saveMsg && <span className={`text-[10px] font-medium ${saveMsg === 'Tersimpan' ? 'text-emerald-500' : 'text-red-500'}`}>{saveMsg}</span>}
                   </div>
                 </div>
+                {!kgMobile && (
+                  <button
+                    type="button"
+                    onClick={() => setKgListCollapsed((prev) => !prev)}
+                    className="hidden md:flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-slate-50 text-slate-600 border border-slate-200 rounded-full hover:bg-slate-100 transition-all font-medium shrink-0"
+                    title={kgListCollapsed ? 'Perbesar daftar' : 'Minimize daftar'}
+                  >
+                    <span className="material-symbols-outlined text-[13px]">{kgListCollapsed ? 'chevron_right' : 'chevron_left'}</span>
+                    {kgListCollapsed ? 'Buka list' : 'Minimize'}
+                  </button>
+                )}
               </div>
               <div className="flex items-center gap-1.5 flex-wrap mt-2">
                 {(localMindmap!.visual_refs?.length ?? 0) > 0 && (
@@ -1409,6 +1446,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [webSearchQuery, setWebSearchQuery] = useState('');
   const [webSearchLoading, setWebSearchLoading] = useState(false);
   const [webSearchPreview, setWebSearchPreview] = useState<string>('');
+  const [listCollapsed, setListCollapsed] = useState(false);
   const [webSearchGrounding, setWebSearchGrounding] = useState<ExaGroundingItem[]>([]);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
   const [webSearchRequestId, setWebSearchRequestId] = useState<string | null>(null);
@@ -1732,67 +1770,81 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         <aside className={`${
           libMobile && mobileDetailView ? 'hidden'
           : 'flex flex-col'
-        } w-full md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)] shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30`}>
+        } w-full ${listCollapsed ? 'md:w-18 lg:w-18' : 'md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)]'} shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 transition-all duration-300 overflow-hidden`}>
           <div className="p-3 md:p-4 border-b border-slate-200/50 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100">Medical Library</h2>
-              <button
-                type="button"
-                onClick={() => void loadDiseases()}
-                className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
-                title="Muat ulang"
-              >
-                <span className="material-symbols-outlined text-[20px]">refresh</span>
-              </button>
-            </div>
-            <label className="block text-xs font-label text-slate-500">Stase</label>
-            <select
-              value={staseSlug}
-              onChange={(e) => {
-                setStaseSlug(e.target.value);
-                setSelectedId(null);
-                setDetail(null);
-              }}
-              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-2 text-sm"
-            >
-              {staseOptions.map((s) => (
-                <option key={s.slug} value={s.slug}>
-                  {s.display_name}
-                </option>
-              ))}
-            </select>
-            <div>
-              <div className="flex justify-between text-xs text-slate-500 mb-1">
-                <span>Progres penjelasan</span>
-                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
-                  {progress.filled}/{progress.total} ({progress.percent}%)
-                </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => void loadDiseases()}
+                  className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                  title="Muat ulang"
+                >
+                  <span className="material-symbols-outlined text-[20px]">refresh</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setListCollapsed((prev) => !prev)}
+                  className="p-2 rounded-xl text-slate-500 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                  title={listCollapsed ? 'Perbesar daftar' : 'Minimize daftar'}
+                >
+                  <span className="material-symbols-outlined text-[20px]">{listCollapsed ? 'chevron_right' : 'chevron_left'}</span>
+                </button>
               </div>
-              <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-linear-to-r from-indigo-500 to-violet-500 transition-all duration-500"
-                  style={{ width: `${Math.min(100, progress.percent)}%` }}
+            </div>
+            {!listCollapsed && (
+              <>
+                <label className="block text-xs font-label text-slate-500">Stase</label>
+                <select
+                  value={staseSlug}
+                  onChange={(e) => {
+                    setStaseSlug(e.target.value);
+                    setSelectedId(null);
+                    setDetail(null);
+                  }}
+                  className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-2 text-sm"
+                >
+                  {staseOptions.map((s) => (
+                    <option key={s.slug} value={s.slug}>
+                      {s.display_name}
+                    </option>
+                  ))}
+                </select>
+                <div>
+                  <div className="flex justify-between text-xs text-slate-500 mb-1">
+                    <span>Progres penjelasan</span>
+                    <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                      {progress.filled}/{progress.total} ({progress.percent}%)
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-linear-to-r from-indigo-500 to-violet-500 transition-all duration-500"
+                      style={{ width: `${Math.min(100, progress.percent)}%` }}
+                    />
+                  </div>
+                </div>
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Cari nama atau nomor..."
+                  className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 px-3 py-2 text-sm"
                 />
-              </div>
-            </div>
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Cari nama atau nomor..."
-              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 px-3 py-2 text-sm"
-            />
-            <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={onlyMissing}
-                onChange={(e) => setOnlyMissing(e.target.checked)}
-                className="rounded border-slate-300"
-              />
-              Hanya yang belum ada penjelasan
-            </label>
+                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={onlyMissing}
+                    onChange={(e) => setOnlyMissing(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  Hanya yang belum ada penjelasan
+                </label>
+              </>
+            )}
           </div>
-          <div className="flex-1 overflow-y-auto p-2">
+          {!listCollapsed && <div className="flex-1 overflow-y-auto p-2">
             {loadingList && <p className="text-center text-sm text-slate-400 py-6">Memuat...</p>}
             {err && <p className="text-xs text-amber-600 px-2 py-2">{err}</p>}
             {!loadingList &&
@@ -1840,7 +1892,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   </ul>
                 </div>
               ))}
-          </div>
+          </div>}
         </aside>
 
         {/* Detail column — hidden on mobile unless detail selected */}
@@ -2524,6 +2576,7 @@ function ConversationNotesPanel({
   const [statusFilter, setStatusFilter] = useState<'all' | ConversationNoteStatus>('all');
   const [err, setErr] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const refreshNotes = useCallback(async () => {
     setLoadingList(true);
@@ -2534,9 +2587,7 @@ function ConversationNotesPanel({
       });
       const rows = r.data.notes || [];
       setNotes(rows);
-      if (!selectedId && rows.length > 0) {
-        setSelectedId(rows[0].id);
-      }
+      if (!selectedId && rows.length > 0) setSelectedId(rows[0].id);
     } catch {
       setErr('Gagal memuat catatan. Pastikan worker dan Supabase aktif.');
     } finally {
@@ -2563,13 +2614,9 @@ function ConversationNotesPanel({
   }, []);
 
   useEffect(() => {
-    if (selectedId) {
-      void loadDetail(selectedId);
-    } else if (notes.length > 0) {
-      void loadDetail(notes[0].id);
-    } else {
-      setDetail(null);
-    }
+    if (selectedId) void loadDetail(selectedId);
+    else if (notes.length > 0) void loadDetail(notes[0].id);
+    else setDetail(null);
   }, [selectedId, notes, loadDetail]);
 
   const filteredNotes = useMemo(() => {
@@ -2577,15 +2624,13 @@ function ConversationNotesPanel({
       if (statusFilter !== 'all' && note.note_status !== statusFilter) return false;
       if (!search.trim()) return true;
       const q = search.toLowerCase().trim();
-      return (
-        note.note_title.toLowerCase().includes(q) ||
-        note.query.toLowerCase().includes(q) ||
-        String(note.disease_name ?? '').toLowerCase().includes(q)
-      );
+      return note.note_title.toLowerCase().includes(q) || note.query.toLowerCase().includes(q) || String(note.disease_name ?? '').toLowerCase().includes(q);
     });
   }, [notes, search, statusFilter]);
 
-  const currentDetail = detail ?? (filteredNotes.length > 0 ? { ...filteredNotes[0], draft_answer: { disease: filteredNotes[0].disease_name ?? filteredNotes[0].note_title, sections: [], citations: [], grounded: true }, evidence_summary: [] } as ConversationNoteDetail : null);
+  const currentDetail = detail ?? (filteredNotes.length > 0
+    ? ({ ...filteredNotes[0], draft_answer: { disease: filteredNotes[0].disease_name ?? filteredNotes[0].note_title, sections: [], citations: [], grounded: true }, evidence_summary: [] } as ConversationNoteDetail)
+    : null);
 
   const updateNote = async () => {
     if (!currentDetail) return;
@@ -2643,11 +2688,16 @@ function ConversationNotesPanel({
             <h2 className="text-xl md:text-2xl font-headline font-black text-slate-800 dark:text-slate-100">Simpan hasil chat jadi catatan</h2>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => void refreshNotes()} className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-              Refresh
-            </button>
-            <button onClick={onOpenLibrary} className="px-4 py-2 rounded-full text-sm border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors">
-              Buka Library
+            <button onClick={() => void refreshNotes()} className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">Refresh</button>
+            <button onClick={onOpenLibrary} className="px-4 py-2 rounded-full text-sm border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors">Buka Library</button>
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              className="px-4 py-2 rounded-full text-sm border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors inline-flex items-center gap-2"
+              title={sidebarCollapsed ? 'Perbesar panel daftar' : 'Minimize panel daftar'}
+            >
+              <span className="material-symbols-outlined text-[18px]">{sidebarCollapsed ? 'chevron_right' : 'chevron_left'}</span>
+              {sidebarCollapsed ? 'Buka daftar' : 'Minimize daftar'}
             </button>
           </div>
         </div>
@@ -2667,15 +2717,23 @@ function ConversationNotesPanel({
         </div>
       </div>
 
-      {err && (
-        <div className="mx-4 md:mx-6 mt-4 rounded-2xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm">
-          {err}
-        </div>
-      )}
+      {err && <div className="mx-4 md:mx-6 mt-4 rounded-2xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm">{err}</div>}
 
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)]">
-        <aside className="border-r border-slate-200/60 dark:border-slate-800 overflow-y-auto">
-          {loadingList ? (
+      <div className={`flex-1 min-h-0 grid grid-cols-1 ${sidebarCollapsed ? 'lg:grid-cols-[84px_minmax(0,1fr)]' : 'lg:grid-cols-[360px_minmax(0,1fr)]'}`}>
+        <aside className={`border-r border-slate-200/60 dark:border-slate-800 overflow-y-auto transition-all duration-300 ${sidebarCollapsed ? 'lg:bg-slate-50/50 dark:lg:bg-slate-950/40' : ''}`}>
+          {sidebarCollapsed ? (
+            <div className="h-full flex items-start justify-center p-3">
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(false)}
+                className="w-full rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-3 text-center text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
+                title="Buka daftar catatan"
+              >
+                <span className="material-symbols-outlined text-[22px]">note_stack</span>
+                <span className="mt-2 block text-[11px] uppercase tracking-[0.25em] font-semibold">Daftar</span>
+              </button>
+            </div>
+          ) : loadingList ? (
             <div className="p-6 text-sm text-slate-500">Memuat catatan...</div>
           ) : filteredNotes.length === 0 ? (
             <div className="p-6 text-sm text-slate-500">Belum ada catatan. Simpan hasil generate dari chat untuk mulai.</div>
@@ -2723,20 +2781,12 @@ function ConversationNotesPanel({
               <div className="rounded-4xl border border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-5 md:p-6">
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="min-w-0">
-                    <input
-                      value={currentDetail.note_title}
-                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_title: e.target.value } : prev)}
-                      className="w-full text-xl md:text-2xl font-headline font-black bg-transparent outline-none text-slate-800 dark:text-slate-100"
-                    />
+                    <input value={currentDetail.note_title} onChange={(e) => setDetail((prev) => prev ? { ...prev, note_title: e.target.value } : prev)} className="w-full text-xl md:text-2xl font-headline font-black bg-transparent outline-none text-slate-800 dark:text-slate-100" />
                     <p className="mt-1 text-sm text-slate-500">{currentDetail.query}</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <button onClick={() => void updateNote()} disabled={saving} className="px-4 py-2 rounded-full text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">
-                      {saving ? 'Menyimpan...' : 'Simpan perubahan'}
-                    </button>
-                    <button onClick={() => void promoteCurrent()} disabled={promoting} className="px-4 py-2 rounded-full text-sm border border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-600 hover:text-white disabled:opacity-60">
-                      {promoting ? 'Mempromosikan...' : 'Promote ke Library'}
-                    </button>
+                    <button onClick={() => void updateNote()} disabled={saving} className="px-4 py-2 rounded-full text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">{saving ? 'Menyimpan...' : 'Simpan perubahan'}</button>
+                    <button onClick={() => void promoteCurrent()} disabled={promoting} className="px-4 py-2 rounded-full text-sm border border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-600 hover:text-white disabled:opacity-60">{promoting ? 'Mempromosikan...' : 'Promote ke Library'}</button>
                   </div>
                 </div>
 
@@ -2750,20 +2800,11 @@ function ConversationNotesPanel({
                 <div className="mt-5 grid grid-cols-1 gap-4">
                   <label className="block">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ringkasan Note</span>
-                    <textarea
-                      value={currentDetail.note_summary ?? ''}
-                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_summary: e.target.value } : prev)}
-                      className="mt-2 w-full min-h-24 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 outline-none"
-                      placeholder="Ringkasan singkat note"
-                    />
+                    <textarea value={currentDetail.note_summary ?? ''} onChange={(e) => setDetail((prev) => prev ? { ...prev, note_summary: e.target.value } : prev)} className="mt-2 w-full min-h-24 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 outline-none" placeholder="Ringkasan singkat note" />
                   </label>
                   <label className="block">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown Note</span>
-                    <textarea
-                      value={currentDetail.note_markdown ?? ''}
-                      onChange={(e) => setDetail((prev) => prev ? { ...prev, note_markdown: e.target.value } : prev)}
-                      className="mt-2 w-full min-h-64 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 font-mono text-sm outline-none"
-                    />
+                    <textarea value={currentDetail.note_markdown ?? ''} onChange={(e) => setDetail((prev) => prev ? { ...prev, note_markdown: e.target.value } : prev)} className="mt-2 w-full min-h-64 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-4 font-mono text-sm outline-none" />
                   </label>
                 </div>
               </div>
@@ -2772,9 +2813,7 @@ function ConversationNotesPanel({
                 <div className="rounded-4xl border border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 p-5">
                   <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-slate-500 mb-4">Preview Note</h3>
                   <div className="prose prose-slate max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-                      {currentDetail.note_markdown || ''}
-                    </ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{currentDetail.note_markdown || ''}</ReactMarkdown>
                   </div>
                 </div>
 
@@ -2797,26 +2836,14 @@ function ConversationNotesPanel({
                   <div>
                     <h3 className="text-sm font-bold uppercase tracking-[0.25em] text-slate-500 mb-3">Target Library</h3>
                     <div className="space-y-3">
-                      <select
-                        value={currentDetail.library_catalog_id ?? currentDetail.match_candidates?.[0]?.catalog_id ?? ''}
-                        onChange={(e) => setDetail((prev) => prev ? { ...prev, library_catalog_id: e.target.value ? Number(e.target.value) : null } : prev)}
-                        className="w-full px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 outline-none"
-                      >
+                      <select value={currentDetail.library_catalog_id ?? currentDetail.match_candidates?.[0]?.catalog_id ?? ''} onChange={(e) => setDetail((prev) => prev ? { ...prev, library_catalog_id: e.target.value ? Number(e.target.value) : null } : prev)} className="w-full px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 outline-none">
                         <option value="">Pilih disease target</option>
-                        {(currentDetail.match_candidates || []).map((cand) => (
-                          <option key={cand.catalog_id} value={cand.catalog_id}>
-                            {cand.name} ({Math.round(cand.score * 100)}%)
-                          </option>
-                        ))}
+                        {(currentDetail.match_candidates || []).map((cand) => <option key={cand.catalog_id} value={cand.catalog_id}>{cand.name} ({Math.round(cand.score * 100)}%)</option>)}
                       </select>
                       {hasCandidates ? (
-                        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
-                          Kandidat promosi tersedia. Pilih target yang paling cocok sebelum promote.
-                        </div>
+                        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">Kandidat promosi tersedia. Pilih target yang paling cocok sebelum promote.</div>
                       ) : (
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                          Belum ada kandidat penyakit yang kuat. Note tetap bisa disimpan, tetapi promote ke Library akan lebih aman jika disease cocok.
-                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">Belum ada kandidat penyakit yang kuat. Note tetap bisa disimpan, tetapi promote ke Library akan lebih aman jika disease cocok.</div>
                       )}
                     </div>
                   </div>
@@ -3692,24 +3719,13 @@ function AdminPanel() {
           ))}
         </div>
 
-        <div className="mt-auto pt-4 border-t border-slate-200/50 flex flex-col gap-1 overflow-x-hidden">
-          {[
-            { icon: 'shield', label: 'Privacy' },
-            { icon: 'contact_support', label: 'Support' },
-          ].map((item) => (
-            <a key={item.label} className="flex items-center gap-3 px-3 py-2 text-slate-600 dark:text-slate-400 hover:text-indigo-500 rounded-xl transition-all flex-row cursor-pointer">
-              <span className="material-symbols-outlined text-[20px] shrink-0 text-center w-6">{item.icon}</span>
-              <span className={`whitespace-nowrap transition-opacity duration-300 ${isSidebarMinimized || isTablet ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>{item.label}</span>
-            </a>
-          ))}
-        </div>
       </nav>
 
       {/* ── Mobile Bottom Nav ── */}
       {isMobile && <MobileBottomNav activeView={activeView} onChangeView={setActiveView} />}
 
       {/* ── Main Content ── */}
-      <main className={`flex-1 flex flex-col h-full min-h-0 relative transition-all duration-300 ml-0 ${isTablet ? 'md:ml-20' : ''} ${!isTablet ? (isSidebarMinimized ? 'md:ml-20' : 'md:ml-72') : ''}`}>
+      <main className={`flex-1 flex flex-col h-full min-h-0 relative transition-all duration-300 ml-0 ${isMobile ? 'pb-[calc(5.75rem+env(safe-area-inset-bottom))]' : 'pb-0'} ${isTablet ? 'md:ml-20' : ''} ${!isTablet ? (isSidebarMinimized ? 'md:ml-20' : 'md:ml-72') : ''}`}>
         {/* Header */}
         <header className="flex justify-between items-center px-3 md:px-8 h-14 md:h-20 w-full sticky top-0 z-30 bg-white/60 dark:bg-slate-900/60 backdrop-blur-3xl tracking-tighter border-b border-white/30 shrink-0">
           <div className="flex items-center gap-2 md:gap-4">
@@ -3740,9 +3756,6 @@ function AdminPanel() {
                 Bersihkan Chat
               </button>
             )}
-            <button className="p-2 text-slate-500 hover:bg-white/40 transition-all rounded-full scale-95 active:duration-150">
-              <span className="material-symbols-outlined">settings</span>
-            </button>
           </div>
         </header>
 
@@ -3775,9 +3788,9 @@ function AdminPanel() {
         {/* Chat Canvas */}
         {activeView === 'chat' && (
         <>
-        <div className="flex-1 overflow-y-auto px-3 md:px-12 lg:px-24 py-4 md:py-8 pb-48 md:pb-40 flex flex-col gap-4 md:gap-8 min-h-0">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-4 md:px-12 lg:px-24 py-4 md:py-8 pb-40 md:pb-40 flex flex-col gap-4 md:gap-8 min-h-0">
           {messages.length === 0 && (
-            <div className="m-auto text-center max-w-md pt-10 md:pt-20 flex flex-col items-center opacity-70 px-4">
+            <div className="m-auto text-center max-w-md pt-8 md:pt-20 flex flex-col items-center opacity-70 px-3 sm:px-4">
               <span className="material-symbols-outlined text-5xl md:text-6xl text-secondary mb-3 md:mb-4 opacity-50" style={{ fontVariationSettings: "'FILL' 1" }}>biotech</span>
               <h2 className="text-xl md:text-2xl font-headline font-bold text-slate-700">Mulai Konsultasi RAG</h2>
               <p className="text-sm mt-2 text-slate-500 leading-relaxed font-body">
@@ -3798,7 +3811,7 @@ function AdminPanel() {
           )}
 
           {messages.map((msg, idx) => (
-            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} gap-1.5 md:gap-2 w-full ${msg.role === 'user' ? 'max-w-[90%] md:max-w-3xl ml-auto' : 'max-w-full md:max-w-4xl mr-auto mt-3 md:mt-6'} view-fade-in`}>
+            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} gap-1.5 md:gap-2 w-full ${msg.role === 'user' ? 'max-w-[94%] md:max-w-3xl ml-auto' : 'max-w-full md:max-w-4xl mr-auto mt-3 md:mt-6'} view-fade-in`}>
               {/* Avatar & Name */}
               <div className="flex items-center gap-2 mb-1 px-2">
                 {msg.role === 'user' ? (
@@ -4034,7 +4047,10 @@ function AdminPanel() {
         </div>
 
         {/* Floating Input Area */}
-        <div className={`absolute left-0 w-full p-3 md:p-6 lg:p-8 bg-linear-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20 ${isMobile ? 'bottom-(--bottom-nav-h)' : 'bottom-0'}`}>
+        <div
+          className="absolute left-0 w-full p-3 md:p-6 lg:p-8 bg-linear-to-t from-background via-background/90 to-transparent pointer-events-none flex justify-center z-20"
+          style={{ bottom: isMobile ? 'calc(5rem + env(safe-area-inset-bottom))' : 0 }}
+        >
           <div className="w-full max-w-4xl pointer-events-auto">
             {/* Stase selector */}
             <div className="flex items-center gap-2 mb-2 px-1">
