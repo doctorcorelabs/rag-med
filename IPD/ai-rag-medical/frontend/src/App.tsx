@@ -180,6 +180,36 @@ type ExaSearchResponse = {
   results: ExaSearchResult[];
 };
 
+type CandidateAnalysisTurn = {
+  role?: string;
+  title?: string;
+  content?: string;
+};
+
+type CandidateComparison = {
+  article_utama_strengths?: string[];
+  kandidat_strengths?: string[];
+  missing_in_kandidat?: string[];
+  new_from_kandidat?: string[];
+  conflicts?: string[];
+};
+
+type CandidateAnalysis = {
+  summary: string;
+  verdict: 'layak' | 'perlu_revisi' | 'tidak_layak';
+  accuracy_score: number;
+  complementarity_score: number;
+  merge_strategy: 'replace' | 'append' | 'hold';
+  comparison?: CandidateComparison;
+  action_points?: string[];
+  chat_session?: CandidateAnalysisTurn[];
+};
+
+type CandidateAnalysisResponse = {
+  ok: boolean;
+  analysis: CandidateAnalysis;
+};
+
 type ConversationNoteStatus = 'draft' | 'saved' | 'ready_to_promote' | 'promoted_to_library' | 'archived' | 'deleted';
 
 type ConversationNoteListItem = {
@@ -1436,6 +1466,9 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
   const [previewCandidate, setPreviewCandidate] = useState('');
   const [previewCombinedEdit, setPreviewCombinedEdit] = useState('');
   const [previewNote, setPreviewNote] = useState('');
+  const [previewAnalysis, setPreviewAnalysis] = useState<CandidateAnalysis | null>(null);
+  const [previewAnalysisLoading, setPreviewAnalysisLoading] = useState(false);
+  const [previewAnalysisError, setPreviewAnalysisError] = useState<string | null>(null);
   const [mergeAiLoading, setMergeAiLoading] = useState(false);
   const [visualOpen, setVisualOpen] = useState(false);
   const [visualBusy, setVisualBusy] = useState(false);
@@ -1536,7 +1569,14 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
       setPreviewCandidate(r.data.markdown_candidate || '');
       setPreviewCombinedEdit(r.data.markdown_combined || '');
       setPreviewNote(r.data.preview_note || '');
+      setPreviewAnalysis(null);
+      setPreviewAnalysisError(null);
       setPreviewOpen(true);
+      void runCandidateAnalysis(
+        r.data.markdown_base || '',
+        r.data.markdown_candidate || '',
+        String(detail?.disease?.name ?? ''),
+      );
       await loadDiseases();
       if (selectedId) await loadDetail(selectedId);
     } catch {
@@ -1713,13 +1753,41 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
     }
   };
 
+  const runCandidateAnalysis = async (baseMarkdown: string, candidateMarkdown: string, focusQuery?: string) => {
+    if (!candidateMarkdown.trim()) {
+      setPreviewAnalysis(null);
+      setPreviewAnalysisError('Kandidat baru kosong, tidak dapat dianalisis.');
+      return;
+    }
+    setPreviewAnalysisLoading(true);
+    setPreviewAnalysisError(null);
+    try {
+      const r = await axios.post<CandidateAnalysisResponse>(`${API_URL}/library/analyze_candidate_copilot`, {
+        markdown_base: baseMarkdown,
+        markdown_candidate: candidateMarkdown,
+        focus_query: focusQuery?.trim() || undefined,
+      });
+      setPreviewAnalysis(r.data.analysis);
+    } catch (e: any) {
+      setPreviewAnalysis(null);
+      setPreviewAnalysisError(e?.response?.data?.detail || e?.response?.data?.error || 'Analisis kandidat gagal dijalankan.');
+    } finally {
+      setPreviewAnalysisLoading(false);
+    }
+  };
+
   const openSearchPreview = (result: ExaSearchResult) => {
     const baseMarkdown = detail?.markdown || '';
+    const candidate = result.markdown_candidate || '';
+    const queryHint = webSearchQuery || String(detail?.disease?.name ?? result.title ?? '');
     setPreviewBase(baseMarkdown);
-    setPreviewCandidate(result.markdown_candidate || '');
+    setPreviewCandidate(candidate);
     setPreviewCombinedEdit(baseMarkdown);
     setPreviewNote(result.title);
+    setPreviewAnalysis(null);
+    setPreviewAnalysisError(null);
     setPreviewOpen(true);
+    void runCandidateAnalysis(baseMarkdown, candidate, queryHint);
   };
 
   const runWebSearch = async (queryOverride?: string) => {
@@ -1770,10 +1838,16 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
         <aside className={`${
           libMobile && mobileDetailView ? 'hidden'
           : 'flex flex-col'
-        } w-full ${listCollapsed ? 'md:w-18 lg:w-18' : 'md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)]'} shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 transition-all duration-300 overflow-hidden`}>
+        } w-full ${listCollapsed ? 'md:w-19 lg:w-21' : 'md:w-[min(320px,40vw)] lg:w-[min(420px,40vw)]'} shrink-0 border-r border-slate-200/60 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/30 transition-all duration-300 overflow-hidden`}>
           <div className="p-3 md:p-4 border-b border-slate-200/50 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100">Medical Library</h2>
+              <div className="min-w-0">
+                {!listCollapsed ? (
+                  <h2 className="text-lg font-headline font-bold text-slate-800 dark:text-slate-100 truncate">Medical Library</h2>
+                ) : (
+                  <span className="material-symbols-outlined text-[20px] text-slate-500">menu_book</span>
+                )}
+              </div>
               <div className="flex items-center gap-1">
                 <button
                   type="button"
@@ -1843,8 +1917,19 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 </label>
               </>
             )}
+            {listCollapsed && (
+              <button
+                type="button"
+                onClick={() => setListCollapsed(false)}
+                className="w-full rounded-2xl border border-indigo-200 bg-indigo-50 px-3 py-3 text-center text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors"
+                title="Buka daftar penyakit"
+              >
+                <span className="material-symbols-outlined text-[20px]">chevron_right</span>
+                <span className="sr-only">Buka daftar penyakit</span>
+              </button>
+            )}
           </div>
-          {!listCollapsed && <div className="flex-1 overflow-y-auto p-2">
+          {!listCollapsed ? <div className="flex-1 overflow-y-auto p-2">
             {loadingList && <p className="text-center text-sm text-slate-400 py-6">Memuat...</p>}
             {err && <p className="text-xs text-amber-600 px-2 py-2">{err}</p>}
             {!loadingList &&
@@ -1892,7 +1977,7 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                   </ul>
                 </div>
               ))}
-          </div>}
+              </div> : null}
         </aside>
 
         {/* Detail column — hidden on mobile unless detail selected */}
@@ -2144,6 +2229,81 @@ function MedicalLibraryPanel({ components }: { components: typeof mdComponents }
                 <span className="material-symbols-outlined">close</span>
               </button>
             </div>
+
+            <div className="mb-3 rounded-xl border border-cyan-200 dark:border-cyan-900/40 bg-cyan-50/70 dark:bg-cyan-950/20 p-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="text-xs uppercase tracking-[0.2em] font-semibold text-cyan-700 dark:text-cyan-300">Analisis kandidat baru (auto)</p>
+                <button
+                  type="button"
+                  disabled={previewAnalysisLoading || !previewCandidate.trim()}
+                  onClick={() => void runCandidateAnalysis(previewBase, previewCandidate, String(detail?.disease?.name ?? webSearchQuery ?? ''))}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium border border-cyan-200 text-cyan-700 bg-white hover:bg-cyan-600 hover:text-white disabled:opacity-60"
+                >
+                  {previewAnalysisLoading ? 'Menganalisis…' : 'Analisis ulang'}
+                </button>
+              </div>
+
+              {previewAnalysisLoading && (
+                <div className="mt-2 text-sm text-cyan-700 dark:text-cyan-300 inline-flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                  Memvalidasi akurasi kandidat terhadap artikel utama...
+                </div>
+              )}
+
+              {previewAnalysisError && !previewAnalysisLoading && (
+                <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{previewAnalysisError}</p>
+              )}
+
+              {previewAnalysis && !previewAnalysisLoading && (
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
+                      previewAnalysis.verdict === 'layak'
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : previewAnalysis.verdict === 'perlu_revisi'
+                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                          : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}>
+                      Verdict: {previewAnalysis.verdict.replace('_', ' ')}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-slate-50 text-slate-700 border-slate-200">
+                      Akurasi {previewAnalysis.accuracy_score}%
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-slate-50 text-slate-700 border-slate-200">
+                      Komplemen {previewAnalysis.complementarity_score}%
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-violet-50 text-violet-700 border-violet-200">
+                      Saran merge: {previewAnalysis.merge_strategy}
+                    </span>
+                  </div>
+
+                  <p className="text-sm text-slate-700 dark:text-slate-200">{previewAnalysis.summary}</p>
+
+                  {Array.isArray(previewAnalysis.chat_session) && previewAnalysis.chat_session.length > 0 && (
+                    <div className="space-y-2">
+                      {previewAnalysis.chat_session.map((turn, idx) => (
+                        <div key={idx} className="rounded-xl border border-cyan-100 dark:border-cyan-900/30 bg-white/80 dark:bg-slate-900/60 p-3">
+                          <p className="text-[11px] uppercase tracking-[0.2em] text-cyan-600 dark:text-cyan-300 font-semibold">
+                            {turn.title || 'Analisis'}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{turn.content || ''}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {Array.isArray(previewAnalysis.action_points) && previewAnalysis.action_points.length > 0 && (
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/60 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500 font-semibold">Rekomendasi tindakan</p>
+                      <ul className="mt-2 list-disc pl-5 text-sm text-slate-700 dark:text-slate-200 space-y-1">
+                        {previewAnalysis.action_points.map((item, idx) => <li key={idx}>{item}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 flex-1 min-h-0">
               <div className="flex flex-col min-h-0 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
                 <div className="text-xs font-semibold px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600">Artikel utama (saat ini)</div>
@@ -2719,14 +2879,14 @@ function ConversationNotesPanel({
 
       {err && <div className="mx-4 md:mx-6 mt-4 rounded-2xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm">{err}</div>}
 
-      <div className={`flex-1 min-h-0 grid grid-cols-1 ${sidebarCollapsed ? 'lg:grid-cols-[84px_minmax(0,1fr)]' : 'lg:grid-cols-[360px_minmax(0,1fr)]'}`}>
+      <div className={`flex-1 min-h-0 grid grid-cols-1 ${sidebarCollapsed ? 'lg:grid-cols-[76px_minmax(0,1fr)]' : 'lg:grid-cols-[360px_minmax(0,1fr)]'}`}>
         <aside className={`border-r border-slate-200/60 dark:border-slate-800 overflow-y-auto transition-all duration-300 ${sidebarCollapsed ? 'lg:bg-slate-50/50 dark:lg:bg-slate-950/40' : ''}`}>
           {sidebarCollapsed ? (
-            <div className="h-full flex items-start justify-center p-3">
+            <div className="h-full flex items-start justify-center p-2">
               <button
                 type="button"
                 onClick={() => setSidebarCollapsed(false)}
-                className="w-full rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-3 text-center text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
+                className="w-full rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-2.5 text-center text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-colors flex flex-col items-center justify-center gap-1"
                 title="Buka daftar catatan"
               >
                 <span className="material-symbols-outlined text-[22px]">note_stack</span>

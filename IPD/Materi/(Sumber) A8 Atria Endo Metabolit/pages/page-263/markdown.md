@@ -1,0 +1,9 @@
+Atria.
+
+# Karsinoma Tiroid
+
+![img-151.jpeg](img-151.jpeg)
+
+- TIPE PAPILLARY → TERSERING
+- TIPE FOLLICULAR
+- HURTHLE CELL THYROID CANCER

@@ -1,0 +1,16 @@
+#
+
+Atria.
+
+# Mnemonic Sindrom Turner
+
+## CLOWNS:
+
+C : CARDIAC ABNORMALITIES
+L : LYMPHEDEMA
+O : OVARIES; UNDERDEVELOPED
+W : WEBBED NECK
+N : NIPPLES WIDELY SPACED
+S : SHORT STATURE
+
+![img-65.jpeg](img-65.jpeg)
