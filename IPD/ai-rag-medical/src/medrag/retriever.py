@@ -15,7 +15,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, EMBEDDING_MODEL, RERANKER_MODEL
+from .config import (
+    DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, EMBEDDING_MODEL, RERANKER_MODEL,
+    DEFAULT_TOP_K_RELEVANT, DEFAULT_TOP_K_EXHAUSTIVE, MAX_TOP_K_EXHAUSTIVE,
+    ENABLE_EXHAUSTIVE_AUTO_MODE,
+)
 
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9/-]{1,}")
 
@@ -221,6 +225,10 @@ LIST_INTENT_KEYWORDS: list[str] = [
     "daftar topik", "apa yang tersedia", "berikan daftar",
     "tampilkan semua", "list semua", "semua materi",
     "materi apa saja", "semua sumber", "list sumber",
+    # Additional keywords (parity with TypeScript worker)
+    "daftar semua", "semua diagnosis", "katalog penyakit",
+    "all diseases", "list all", "list diseases",
+    "seluruh penyakit",
 ]
 
 
@@ -228,6 +236,29 @@ def detect_list_intent(query: str) -> bool:
     """Deteksi apakah query ingin enumerasi daftar penyakit/topik."""
     q = query.lower()
     return any(kw in q for kw in LIST_INTENT_KEYWORDS)
+
+
+# Alias used internally and exported for tests
+_is_listing_intent = detect_list_intent
+
+
+def _resolve_retrieval_mode(
+    query: str,
+    requested_mode: str | None = None,
+) -> str:
+    """
+    Resolve retrieval mode to either 'relevant' or 'exhaustive'.
+
+    Priority:
+      1. Explicit ``requested_mode`` from the caller (API field).
+      2. Auto-detection via listing intent (when ENABLE_EXHAUSTIVE_AUTO_MODE is True).
+      3. Default: 'relevant'.
+    """
+    if requested_mode in ("relevant", "exhaustive"):
+        return requested_mode
+    if ENABLE_EXHAUSTIVE_AUTO_MODE and _is_listing_intent(query):
+        return "exhaustive"
+    return "relevant"
 
 
 def get_topics_from_db(
@@ -391,9 +422,24 @@ def search_chunks(
     top_k: int = 8,
     chat_history: list[dict[str, Any]] | None = None,
     chroma_path: Path | None = None,
+    retrieval_mode: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Hybrid FTS + Semantic Search with Ph.D.-Level Multi-Query Decomposition."""
+    """Hybrid FTS + Semantic Search with Ph.D.-Level Multi-Query Decomposition.
+
+    Args:
+        db_path: Path to the SQLite database.
+        query: User query string.
+        top_k: Base number of results for relevant mode.
+        chat_history: Optional prior conversation turns for query enrichment.
+        chroma_path: Optional path to ChromaDB vector store.
+        retrieval_mode: One of ``'relevant'`` (default focused QA) or
+            ``'exhaustive'`` (listing/catalog mode).  When ``None``, the mode
+            is resolved automatically via :func:`_resolve_retrieval_mode`.
+    """
     database = db_path or DEFAULT_DB_PATH
+
+    mode = _resolve_retrieval_mode(query, retrieval_mode)
+    is_exhaustive = mode == "exhaustive"
 
     enriched_query = _enrich_query_from_history(query, chat_history)
 
@@ -401,16 +447,25 @@ def search_chunks(
     is_detail = _is_detail_request(enriched_query)
     intent = _extract_topic_intent(enriched_query)
 
-    # Adaptive top_k
-    effective_top_k = top_k
-    if is_detail:
-        effective_top_k = max(top_k * 2, 16)
+    # Adaptive top_k — exhaustive mode overrides all other scaling
+    if is_exhaustive:
+        effective_top_k = min(
+            max(top_k, DEFAULT_TOP_K_EXHAUSTIVE),
+            MAX_TOP_K_EXHAUSTIVE,
+        )
+    elif is_detail:
+        effective_top_k = max(top_k, DEFAULT_TOP_K_RELEVANT * 2)
     elif not detected_disease and not intent:
         # Broad/generic query: pakai minimum 12 untuk coverage lebih baik
         effective_top_k = max(top_k, 12)
+    else:
+        effective_top_k = top_k
 
-    queries_to_run = [enriched_query]
-    if is_detail or (detected_disease and not intent):
+    # In exhaustive mode, run a single broad query to maximise coverage.
+    # In focused/detail modes, decompose into clinical sub-queries.
+    if is_exhaustive:
+        queries_to_run = [enriched_query]
+    elif is_detail or (detected_disease and not intent):
         base = detected_disease if detected_disease else enriched_query
         queries_to_run = [
             f"{base} definisi etiologi patogenesis",
@@ -418,6 +473,8 @@ def search_chunks(
             f"{base} diagnosis tatalaksana dosis obat algoritma",
             f"{base} komplikasi prognosis",
         ]
+    else:
+        queries_to_run = [enriched_query]
 
     all_results: list[dict[str, Any]] = []
     seen_ids: set = set()
@@ -453,22 +510,29 @@ def search_chunks(
             enriched_query, all_results, top_k=effective_top_k * len(queries_to_run)
         )
 
-        # Disease relevance gating
-        filtered_results = _filter_by_disease_relevance(reranked_results, detected_disease)
+        # Disease relevance gating — skip in exhaustive mode to preserve coverage
+        if is_exhaustive:
+            filtered_results = reranked_results
+        else:
+            filtered_results = _filter_by_disease_relevance(reranked_results, detected_disease)
 
-        # Jaccard dynamic pruning
-        pruned_results = _prune_redundant_chunks(filtered_results, similarity_threshold=0.6)
+        # Jaccard dynamic pruning — use a looser threshold in exhaustive mode
+        prune_threshold = 0.85 if is_exhaustive else 0.6
+        pruned_results = _prune_redundant_chunks(filtered_results, similarity_threshold=prune_threshold)
 
         # Hierarchical sort by intent
         sorted_results = _hierarchical_sort(
             pruned_results, intent_category=intent, top_k=effective_top_k * len(queries_to_run)
         )
 
-        # Context window expansion: fetch sibling chunks
-        expanded_results = _expand_context(conn, sorted_results, expand_siblings=1)
-
-        # Final dedup after expansion
-        final = _prune_redundant_chunks(expanded_results, similarity_threshold=0.7)
+        # Context window expansion: fetch sibling chunks (skip in exhaustive mode to
+        # avoid bloating a potentially very large result set)
+        if not is_exhaustive:
+            expanded_results = _expand_context(conn, sorted_results, expand_siblings=1)
+            # Final dedup after expansion
+            final = _prune_redundant_chunks(expanded_results, similarity_threshold=0.7)
+        else:
+            final = sorted_results
 
         return final[:effective_top_k * len(queries_to_run)]
     finally:
@@ -934,6 +998,91 @@ def get_knowledge_graph(db_path: Path | None, disease_name: str, max_nodes: int 
         "edges": edges_list[:max_nodes * 2],
         "disease": disease_name,
     }
+
+
+# ─────────────────────────────────────────────
+# Disease List Extractor (for exhaustive mode)
+# ─────────────────────────────────────────────
+
+def extract_disease_list_from_chunks(
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Build a deduplicated list of disease/topic names from retrieved chunks.
+
+    Each entry contains the canonical name plus evidence metadata.
+    This is used in exhaustive/listing mode to produce a structured catalog
+    rather than a narrative QA answer.
+
+    Sources considered (in priority order):
+    1. ``disease_tags`` field on the chunk
+    2. ``heading`` of the chunk (filtered to avoid generic clinical headings)
+    3. ``source_name`` as a fallback topic label
+
+    Returns a list of dicts with keys:
+      - ``name``: canonical display name
+      - ``evidence``: list of {source_name, page_no, heading}
+    """
+    # Generic clinical section headings that are NOT disease names
+    _GENERIC_HEADINGS: frozenset[str] = frozenset([
+        "patofisiologi", "patogenesis", "definisi", "etiologi", "tatalaksana",
+        "tata laksana", "manifestasi klinis", "manifestasi", "diagnosis",
+        "komplikasi", "prognosis", "general", "pemeriksaan fisik",
+        "pemeriksaan penunjang", "anamnesis", "faktor risiko", "etiologi dan faktor risiko",
+        "komplikasi dan prognosis", "ringkasan klinis", "penunjang", "farmakologi",
+        "image from page folder",
+    ])
+
+    seen: dict[str, dict[str, Any]] = {}  # normalized_name → entry
+
+    for chunk in chunks:
+        evidence_item = {
+            "source_name": chunk.get("source_name", ""),
+            "page_no": chunk.get("page_no", 0),
+            "heading": chunk.get("heading", ""),
+        }
+
+        candidates: list[str] = []
+
+        # 1. disease_tags (comma/semicolon-separated)
+        tags_raw: str = chunk.get("disease_tags", "") or ""
+        if tags_raw.strip():
+            for tag in re.split(r"[,;|]", tags_raw):
+                t = tag.strip()
+                if t:
+                    candidates.append(t)
+
+        # 2. heading — skip generic clinical section names
+        heading: str = (chunk.get("heading", "") or "").strip()
+        if heading and heading.lower().rstrip(":") not in _GENERIC_HEADINGS:
+            candidates.append(heading)
+
+        # 3. source_name as last-resort label
+        src_name: str = (chunk.get("source_name", "") or "").strip()
+        if src_name and not candidates:
+            candidates.append(src_name)
+
+        for cand in candidates:
+            norm = cand.lower().strip()
+            if not norm or len(norm) < 3:
+                continue
+            if norm in seen:
+                # Merge evidence, keep unique source+page combos
+                existing_ev = seen[norm]["evidence"]
+                ev_key = f"{evidence_item['source_name']}:{evidence_item['page_no']}"
+                existing_keys = {
+                    f"{e['source_name']}:{e['page_no']}" for e in existing_ev
+                }
+                if ev_key not in existing_keys:
+                    existing_ev.append(evidence_item)
+            else:
+                seen[norm] = {
+                    "name": cand,
+                    "evidence": [evidence_item],
+                }
+
+    # Sort alphabetically by normalized name
+    return [entry for _norm, entry in sorted(seen.items())]
 
 
 # ─────────────────────────────────────────────

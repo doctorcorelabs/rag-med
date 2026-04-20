@@ -19,6 +19,7 @@ from .retriever import (
     related_images, search_chunks, synthesize_answer, get_knowledge_graph,
     _extract_disease_name, _extract_topic_intent, _is_detail_request,
     detect_list_intent, get_topics_from_db,
+    _resolve_retrieval_mode, extract_disease_list_from_chunks,
 )
 from .copilot_client import (
     ask_copilot_adaptive,
@@ -65,6 +66,14 @@ class SearchDiseaseRequest(BaseModel):
     top_k: int = Field(default=8, ge=3, le=20)
     include_images: bool = True
     chat_history: list[ChatHistoryItem] = Field(default_factory=list)
+    # Dynamic retrieval mode
+    # "relevant" → focused QA (default), "exhaustive" → listing/catalog mode.
+    # When omitted, the mode is auto-detected from the query text.
+    retrieval_mode: Literal["relevant", "exhaustive"] | None = None
+    # Optional paging controls (used when retrieval_mode="exhaustive")
+    max_items: int | None = Field(default=None, ge=1, le=500)
+    page: int | None = Field(default=None, ge=1)
+    page_size: int | None = Field(default=None, ge=1, le=200)
 
 
 class ImageRequest(BaseModel):
@@ -271,10 +280,42 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             {"role": h.role, "content": h.content} for h in payload.chat_history
         ]
 
+        # Resolve retrieval mode (explicit override or auto-detected from query)
+        mode = _resolve_retrieval_mode(payload.disease_name, payload.retrieval_mode)
+        is_exhaustive = mode == "exhaustive"
+
         # ── Cek list intent sebelum semantic search ────────────────────────
-        if detect_list_intent(payload.disease_name):
+        if is_exhaustive:
+            # Exhaustive mode: use semantic search with higher top_k then build
+            # a deduplicated disease list.  Topics DB is always added for
+            # completeness.
             topics = get_topics_from_db(database)
-            # Build simple structured answer for list queries
+
+            evidence = search_chunks(
+                database,
+                payload.disease_name,
+                top_k=payload.top_k,
+                chat_history=history_dicts if history_dicts else None,
+                retrieval_mode="exhaustive",
+            )
+
+            # Build disease list from retrieved chunks
+            raw_disease_list = extract_disease_list_from_chunks(evidence)
+
+            # Apply optional pagination / max_items
+            page_size = payload.page_size or 50
+            page = payload.page or 1
+            max_items = payload.max_items
+            total_found = len(raw_disease_list)
+            if max_items:
+                raw_disease_list = raw_disease_list[:max_items]
+
+            start = (page - 1) * page_size
+            paged_list = raw_disease_list[start:start + page_size]
+            returned_count = len(paged_list)
+            is_truncated = (start + returned_count) < len(raw_disease_list)
+
+            # Build a structured answer for list queries
             sections = []
             for src in topics.get("sources", []):
                 topics_md = "\n".join(
@@ -295,15 +336,28 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     list_answer = ask_copilot_for_list(topics, github_token)
                 except Exception:
                     pass  # fallback ke list_answer manual di atas
+
             return {
                 "query": payload.disease_name,
-                "query_analysis": {"is_list_intent": True},
+                "query_analysis": {
+                    "is_list_intent": True,
+                    "retrieval_mode": mode,
+                },
+                "retrieval_mode": mode,
                 "detail_level": payload.detail_level,
-                "evidence_count": 0,
+                "evidence_count": len(evidence),
                 "evidence": [],
                 "draft_answer": list_answer,
                 "images": [],
                 "topics": topics,
+                "disease_list": paged_list,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_found": total_found,
+                    "returned_count": returned_count,
+                    "is_truncated": is_truncated,
+                },
                 "note": "Query terdeteksi sebagai permintaan daftar; mengembalikan enumerasi dari knowledge base.",
             }
 
@@ -316,6 +370,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             payload.disease_name,
             top_k=payload.top_k,
             chat_history=history_dicts if history_dicts else None,
+            retrieval_mode="relevant",
         )
 
         evidence_with_urls = _enrich_evidence_with_urls(evidence)
@@ -346,12 +401,21 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 "detected_disease": detected_disease,
                 "detected_intent": detected_intent,
                 "is_detail_request": is_detail,
+                "retrieval_mode": mode,
             },
+            "retrieval_mode": mode,
             "detail_level": payload.detail_level,
             "evidence_count": len(evidence),
             "evidence": evidence_with_urls,
             "draft_answer": answer,
             "images": images,
+            "pagination": {
+                "page": 1,
+                "page_size": len(evidence),
+                "total_found": len(evidence),
+                "returned_count": len(evidence),
+                "is_truncated": False,
+            },
             "note": "Gunakan draft_answer sebagai basis penjelasan grounded.",
         }
 
