@@ -54,11 +54,21 @@ type ApiResponse = {
       total_citations: number;
       relevant_citations: number;
       filtered_citations: number;
+      unsupported_claims_removed: number;
+      section_unsupported_removed_map: Record<string, number>;
     };
     question_style?: string;
+    style_confidence?: number;
+    intent_confidence?: number;
+    ambiguity?: boolean;
+    ambiguity_candidates?: string[];
     detection_method?: string;
     detection_confidence?: number;
     retrieval_passes?: number;
+    retry_mode?: 'none' | 'recall' | 'precision';
+    retry_reason?: string;
+    regenerated_sections?: string[];
+    section_regeneration_passes?: number;
   };
   images: ImageItem[];
   retrieval_diagnostics?: {
@@ -3056,6 +3066,16 @@ function AdminPanel() {
                                 Retrieval {msg.data.draft_answer.retrieval_passes}x
                               </span>
                             )}
+                            {typeof msg.data.draft_answer.retry_mode === 'string' && msg.data.draft_answer.retry_mode !== 'none' && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-orange-50 text-orange-700 border-orange-200" title={msg.data.draft_answer.retry_reason || ''}>
+                                Retry {msg.data.draft_answer.retry_mode}
+                              </span>
+                            )}
+                            {Array.isArray(msg.data.draft_answer.regenerated_sections) && msg.data.draft_answer.regenerated_sections.length > 0 && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-violet-50 text-violet-700 border-violet-200" title={msg.data.draft_answer.regenerated_sections.join(', ')}>
+                                Regen {msg.data.draft_answer.regenerated_sections.length}
+                              </span>
+                            )}
                             {typeof msg.data.draft_answer.citation_quality?.overall_precision === 'number' && (
                               <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border ${
                                 msg.data.draft_answer.citation_quality.overall_precision >= 0.7
@@ -3067,9 +3087,24 @@ function AdminPanel() {
                                 Citation {Math.round(msg.data.draft_answer.citation_quality.overall_precision * 100)}%
                               </span>
                             )}
+                            {typeof msg.data.draft_answer.citation_quality?.unsupported_claims_removed === 'number' && msg.data.draft_answer.citation_quality.unsupported_claims_removed > 0 && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-rose-50 text-rose-700 border-rose-200">
+                                Scrubbed {msg.data.draft_answer.citation_quality.unsupported_claims_removed}
+                              </span>
+                            )}
                             {typeof msg.data.draft_answer.question_style === 'string' && (
                               <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-cyan-50 text-cyan-700 border-cyan-200">
                                 Style {msg.data.draft_answer.question_style}
+                              </span>
+                            )}
+                            {typeof msg.data.draft_answer.style_confidence === 'number' && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-slate-50 text-slate-700 border-slate-200">
+                                Planner {Math.round(msg.data.draft_answer.style_confidence * 100)}%
+                              </span>
+                            )}
+                            {msg.data.draft_answer.ambiguity === true && (
+                              <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200">
+                                Ambiguity
                               </span>
                             )}
                             {typeof msg.data.draft_answer.detection_method === 'string' && (
