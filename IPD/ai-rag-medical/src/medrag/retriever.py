@@ -454,7 +454,7 @@ def search_chunks(
             MAX_TOP_K_EXHAUSTIVE,
         )
     elif is_detail:
-        effective_top_k = max(top_k, DEFAULT_TOP_K_RELEVANT * 2, 16)
+        effective_top_k = max(top_k, DEFAULT_TOP_K_RELEVANT * 2)
     elif not detected_disease and not intent:
         # Broad/generic query: pakai minimum 12 untuk coverage lebih baik
         effective_top_k = max(top_k, 12)
@@ -1085,7 +1085,9 @@ def extract_disease_list_from_chunks(
     return [entry for _norm, entry in sorted(seen.items())]
 
 
-
+# ─────────────────────────────────────────────
+# Smart Section Picker for Rule-based Synthesis
+# ─────────────────────────────────────────────
 def _pick_section(heading: str, content: str) -> str:
     merged = f"{heading} {content[:250]}".lower()
     for section, keywords in SECTION_RULES.items():

@@ -311,7 +311,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 raw_disease_list = raw_disease_list[:max_items]
 
             start = (page - 1) * page_size
-            paged_list = raw_disease_list[start: start + page_size]
+            paged_list = raw_disease_list[start:start + page_size]
             returned_count = len(paged_list)
             is_truncated = (start + returned_count) < len(raw_disease_list)
 
