@@ -1067,6 +1067,122 @@ ATURAN:
   return stripMarkdownFence(raw);
 }
 
+export async function analyzeCandidateAgainstBase(
+  markdownBase: string,
+  markdownCandidate: string,
+  githubToken: string,
+  focusQuery?: string,
+): Promise<Record<string, unknown>> {
+  const copilotToken = await getCopilotToken(githubToken);
+  const query = (focusQuery ?? "").trim();
+  const system = `Anda adalah reviewer medis senior untuk alur compare/merge artikel.
+
+Tugas:
+1. Nilai apakah Kandidat Baru akurat terhadap Artikel Utama (jika artikel utama ada).
+2. Jelaskan perbandingan: mana yang lebih lengkap/lebih kuat, mana yang bertentangan.
+3. Tentukan apakah Kandidat Baru layak digabung, perlu revisi, atau sebaiknya ditolak.
+4. Beri rekomendasi mode merge: "replace", "append", atau "hold".
+
+ATURAN KETAT:
+- Jangan mengarang fakta baru di luar dua teks input.
+- Jika artikel utama kosong, nilai kandidat terhadap konsistensi internal dan kehati-hatian klinis.
+- Jawab dalam Bahasa Indonesia medis formal.
+- Output HARUS JSON valid sesuai schema, tanpa markdown fence.
+
+Schema output wajib:
+{
+  "summary": "ringkasan singkat",
+  "verdict": "layak" | "perlu_revisi" | "tidak_layak",
+  "accuracy_score": 0,
+  "complementarity_score": 0,
+  "merge_strategy": "replace" | "append" | "hold",
+  "comparison": {
+    "article_utama_strengths": ["..."],
+    "kandidat_strengths": ["..."],
+    "missing_in_kandidat": ["..."],
+    "new_from_kandidat": ["..."],
+    "conflicts": ["..."]
+  },
+  "action_points": ["..."],
+  "chat_session": [
+    { "role": "assistant", "title": "Validasi Akurasi", "content": "..." },
+    { "role": "assistant", "title": "Perbandingan Dengan Artikel Utama", "content": "..." },
+    { "role": "assistant", "title": "Keputusan Merge", "content": "..." }
+  ]
+}`;
+
+  const user = `Fokus topik: ${query || "(tidak dispesifikkan)"}
+
+## Artikel utama (saat ini)
+
+${markdownBase.trim() || "(belum ada artikel utama)"}
+
+---
+
+## Kandidat baru (regenerate/web search)
+
+${markdownCandidate.trim()}
+
+Analisis sesuai schema JSON.`;
+
+  try {
+    const raw = await callCopilot(copilotToken, [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ]);
+
+    let content = raw.trim();
+    if (content.startsWith("```json")) content = content.slice(7);
+    if (content.startsWith("```")) content = content.slice(3);
+    if (content.endsWith("```")) content = content.slice(0, -3);
+    const parsed = JSON.parse(content.trim()) as Record<string, unknown>;
+
+    const verdict = String(parsed.verdict ?? "perlu_revisi");
+    const mergeStrategy = String(parsed.merge_strategy ?? "hold");
+    const accuracyScore = Number(parsed.accuracy_score ?? 0);
+    const complementarityScore = Number(parsed.complementarity_score ?? 0);
+
+    return {
+      summary: String(parsed.summary ?? "Analisis berhasil dibuat."),
+      verdict: ["layak", "perlu_revisi", "tidak_layak"].includes(verdict) ? verdict : "perlu_revisi",
+      accuracy_score: Number.isFinite(accuracyScore) ? Math.max(0, Math.min(100, Math.round(accuracyScore))) : 0,
+      complementarity_score: Number.isFinite(complementarityScore)
+        ? Math.max(0, Math.min(100, Math.round(complementarityScore)))
+        : 0,
+      merge_strategy: ["replace", "append", "hold"].includes(mergeStrategy) ? mergeStrategy : "hold",
+      comparison: (parsed.comparison as Record<string, unknown>) ?? {},
+      action_points: Array.isArray(parsed.action_points) ? parsed.action_points : [],
+      chat_session: Array.isArray(parsed.chat_session) ? parsed.chat_session : [],
+    };
+  } catch (error) {
+    return {
+      summary: "Analisis otomatis gagal diparse; silakan tinjau kandidat secara manual.",
+      verdict: "perlu_revisi",
+      accuracy_score: 0,
+      complementarity_score: 0,
+      merge_strategy: "hold",
+      comparison: {
+        article_utama_strengths: [],
+        kandidat_strengths: [],
+        missing_in_kandidat: [],
+        new_from_kandidat: [],
+        conflicts: [String(error)],
+      },
+      action_points: [
+        "Periksa konsistensi istilah dan sitasi pada kandidat baru.",
+        "Lakukan merge manual atau jalankan ulang analisis.",
+      ],
+      chat_session: [
+        {
+          role: "assistant",
+          title: "Analisis otomatis",
+          content: "Terjadi kegagalan parsing output model. Gunakan review manual untuk sementara.",
+        },
+      ],
+    };
+  }
+}
+
 export async function generateMindmapFromArticle(
   diseaseName: string,
   markdownContent: string,

@@ -21,6 +21,7 @@ import {
   askCopilotForPureList,
   refineMarkdownWithInstruction,
   mergeTwoMarkdownArticles,
+  analyzeCandidateAgainstBase,
   generateMindmapFromArticle,
 } from "./copilot-client";
 import {
@@ -307,6 +308,12 @@ const MindmapSaveSchema = z.object({
 const MergeMarkdownSchema = z.object({
   markdown_base: z.string().default(""),
   markdown_candidate: z.string().min(1),
+});
+
+const AnalyzeCandidateSchema = z.object({
+  markdown_base: z.string().default(""),
+  markdown_candidate: z.string().min(1),
+  focus_query: z.string().optional(),
 });
 
 const ExaSearchSchema = z.object({
@@ -1495,6 +1502,21 @@ app.post("/library/merge_markdown_copilot", async (c) => {
     c.env.GITHUB_TOKEN,
   );
   return c.json({ ok: true, markdown_merged: merged });
+});
+
+app.post("/library/analyze_candidate_copilot", async (c) => {
+  if (!c.env.GITHUB_TOKEN) return c.json({ error: "GITHUB_TOKEN required" }, 503);
+  const payload = await parseBody(c, AnalyzeCandidateSchema);
+  if (!payload) return c.json({ error: "Invalid request body" }, 422);
+
+  const analysis = await analyzeCandidateAgainstBase(
+    payload.markdown_base ?? "",
+    payload.markdown_candidate,
+    c.env.GITHUB_TOKEN,
+    payload.focus_query,
+  );
+
+  return c.json({ ok: true, analysis });
 });
 
 app.post("/library/websearch_exa", async (c) => {
