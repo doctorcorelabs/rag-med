@@ -405,13 +405,17 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
         github_token = os.getenv("GITHUB_TOKEN")
         if github_token:
-            answer = ask_copilot_adaptive(
-                payload.disease_name,
-                evidence,
-                github_token,
-                chat_history=history_dicts if history_dicts else None,
-                images=images,
-            )
+            try:
+                answer = ask_copilot_adaptive(
+                    payload.disease_name,
+                    evidence,
+                    github_token,
+                    chat_history=history_dicts if history_dicts else None,
+                    images=images,
+                )
+            except Exception as e:
+                print(f"[WARN] ask_copilot_adaptive failed, falling back to synthesize_answer: {e}")
+                answer = synthesize_answer(payload.disease_name, evidence)
         else:
             answer = synthesize_answer(payload.disease_name, evidence)
 

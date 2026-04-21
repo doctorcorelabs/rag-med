@@ -820,7 +820,11 @@ def _rerank_cross_encoder(query: str, candidates: list[dict[str, Any]], top_k: i
         return candidates[:top_k]
 
     if _reranker is None:
-        _reranker = CrossEncoder(RERANKER_MODEL)
+        try:
+            _reranker = CrossEncoder(RERANKER_MODEL)
+        except Exception as e:
+            print(f"[WARN] CrossEncoder model unavailable, skipping rerank: {e}")
+            return candidates[:top_k]
 
     pairs = [(query, c.get("content", "")) for c in candidates]
     scores = _reranker.predict(pairs)
