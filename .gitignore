@@ -6,7 +6,7 @@
 
 .env.development
 .env.migration.example
-
+IPD/ai-rag-medical/worker/.dev.vars
 
 # Python
 __pycache__/

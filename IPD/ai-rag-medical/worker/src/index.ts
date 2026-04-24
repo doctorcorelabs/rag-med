@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 
-import type { Env, ChunkRecord, ExaSearchResult } from "./types";
+import type { Env, ChunkRecord, ExaSearchResult, ChatHistoryItem } from "./types";
 import {
   searchChunks,
   searchChunksWithDiagnostics,
@@ -19,6 +19,12 @@ import {
 import {
   askCopilotAdaptive,
   askCopilotForPureList,
+} from "./copilot-client";
+import {
+  askOpenRouterAdaptive,
+  askOpenRouterForPureList,
+} from "./openrouter-client";
+import {
   refineMarkdownWithInstruction,
   mergeTwoMarkdownArticles,
   analyzeCandidateAgainstBase,
@@ -1113,7 +1119,30 @@ async function runArticleGenerationPipeline(
   }));
 
   let draftAnswer: Record<string, unknown>;
-  if (env.GITHUB_TOKEN) {
+  if (env.OPENROUTER_API_KEY) {
+    try {
+      draftAnswer = (await askOpenRouterAdaptive(
+        query,
+        evidence,
+        env.OPENROUTER_API_KEY,
+        undefined,
+        rawImages,
+      )) as unknown as Record<string, unknown>;
+    } catch (e) {
+      console.error("[WARN] OpenRouter failed, falling back to Copilot:", e);
+      if (env.GITHUB_TOKEN) {
+        draftAnswer = (await askCopilotAdaptive(
+          query,
+          evidence,
+          env.GITHUB_TOKEN,
+          undefined,
+          rawImages,
+        )) as unknown as Record<string, unknown>;
+      } else {
+        draftAnswer = synthesizeFallback(query, evidence) as unknown as Record<string, unknown>;
+      }
+    }
+  } else if (env.GITHUB_TOKEN) {
     draftAnswer = (await askCopilotAdaptive(
       query,
       evidence,
@@ -1204,7 +1233,39 @@ app.post("/search_disease_context", async (c) => {
     let listRefinedByAi = false;
 
     // --- AI Refinement (Optional) ---
-    if (c.env.GITHUB_TOKEN) {
+    if (c.env.OPENROUTER_API_KEY) {
+      try {
+        listAnswer = (await askOpenRouterForPureList(
+          topics,
+          c.env.OPENROUTER_API_KEY,
+        )) as unknown as Record<string, any>;
+        if (!Array.isArray(listAnswer.sections) || listAnswer.sections.length === 0) {
+          listAnswer = buildPureListFallback(topics);
+        } else {
+          listRefinedByAi = true;
+        }
+      } catch (e) {
+        console.warn("[WARN] OpenRouter list refinement failed, falling back to Copilot:", e);
+        if (c.env.GITHUB_TOKEN) {
+          try {
+            listAnswer = (await askCopilotForPureList(
+              topics,
+              c.env.GITHUB_TOKEN,
+            )) as unknown as Record<string, any>;
+            if (!Array.isArray(listAnswer.sections) || listAnswer.sections.length === 0) {
+              listAnswer = buildPureListFallback(topics);
+            } else {
+              listRefinedByAi = true;
+            }
+          } catch (e2) {
+             console.warn("[WARN] Copilot list refinement failed, using raw DB list:", e2);
+             listAnswer = buildPureListFallback(topics);
+          }
+        } else {
+          listAnswer = buildPureListFallback(topics);
+        }
+      }
+    } else if (c.env.GITHUB_TOKEN) {
       try {
         // AI will filter noise (like symbols and page numbers) while maintaining completeness
         listAnswer = (await askCopilotForPureList(
@@ -1315,7 +1376,28 @@ app.post("/search_disease_context", async (c) => {
   const evidenceQuality = returnedCount >= MIN_EVIDENCE_FOR_AI ? "ok" : "low";
 
   let answer: Record<string, unknown>;
-  if (c.env.GITHUB_TOKEN && returnedCount >= MIN_EVIDENCE_FOR_AI) {
+  if (c.env.OPENROUTER_API_KEY && returnedCount >= MIN_EVIDENCE_FOR_AI) {
+    try {
+      answer = (await askOpenRouterAdaptive(
+        payload.disease_name,
+        returnedEvidence,
+        c.env.OPENROUTER_API_KEY,
+        history.length > 0 ? (history as ChatHistoryItem[]) : undefined,
+      )) as unknown as Record<string, unknown>;
+    } catch (e) {
+      console.warn("[WARN] OpenRouter failed, falling back to Copilot:", e);
+      if (c.env.GITHUB_TOKEN) {
+        answer = (await askCopilotAdaptive(
+          payload.disease_name,
+          returnedEvidence,
+          c.env.GITHUB_TOKEN,
+          history.length > 0 ? (history as ChatHistoryItem[]) : undefined,
+        )) as unknown as Record<string, unknown>;
+      } else {
+        answer = synthesizeFallback(payload.disease_name, returnedEvidence) as unknown as Record<string, unknown>;
+      }
+    }
+  } else if (c.env.GITHUB_TOKEN && returnedCount >= MIN_EVIDENCE_FOR_AI) {
     answer = (await askCopilotAdaptive(
       payload.disease_name,
       returnedEvidence,

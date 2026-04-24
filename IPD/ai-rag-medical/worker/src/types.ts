@@ -7,6 +7,8 @@ export interface Env {
   SUPABASE_SERVICE_KEY: string;
   // GitHub Copilot
   GITHUB_TOKEN: string;
+  // OpenRouter
+  OPENROUTER_API_KEY?: string;
   // Exa web search
   EXA_API_KEY?: string;
   // Cloudflare Workers AI binding
