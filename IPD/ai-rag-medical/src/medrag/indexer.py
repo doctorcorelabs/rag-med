@@ -8,7 +8,7 @@ from typing import Iterable
 
 from .config import (
     DEFAULT_DB_PATH, DEFAULT_CHROMA_PATH, DEFAULT_WORKSPACE_ROOT,
-    MATERI_GLOB, MATERI_PAGE_GLOB, STASE_MATERI_ROOTS, EMBEDDING_MODEL,
+    MATERI_GLOB, MATERI_PAGE_GLOB, EMBEDDING_MODEL,
     load_stase_roots,
 )
 from .models import ChunkRecord, ImageRecord, SourcePage
@@ -117,7 +117,7 @@ def discover_source_pages(workspace_root: Path) -> list[SourcePage]:
     """Discover all markdown source pages across all configured stases (hardcoded + overrides)."""
     pages: list[SourcePage] = []
 
-    for stase_slug, materi_dir in load_stase_roots():  # ← dynamic loader
+    for stase_slug, materi_dir in load_stase_roots(workspace_root):
         materi_root = workspace_root / materi_dir
         if not materi_root.is_dir():
             continue
@@ -679,7 +679,7 @@ def build_index_for_source(
     """
     # Temukan materi root untuk stase ini
     materi_root: Path | None = None
-    for slug, materi_rel in load_stase_roots():
+    for slug, materi_rel in load_stase_roots(workspace_root):
         if slug == stase_slug:
             materi_root = workspace_root / materi_rel
             break

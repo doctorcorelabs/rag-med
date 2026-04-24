@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_WORKSPACE_ROOT, PROJECT_ROOT
+from .config import DEFAULT_WORKSPACE_ROOT, PROJECT_ROOT, load_stase_roots
 from . import library as library_mod
 
 # Path file JSON untuk stase dinamis (di luar hardcoded STASE_MATERI_ROOTS)
@@ -63,6 +63,11 @@ def stase_slug_to_dirname(slug: str) -> str:
 def _next_sort_order(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stase")
     return cur.fetchone()[0]
+
+
+def _workspace_discovered_stases(workspace_root: Path) -> list[tuple[str, str]]:
+    """Return locally discovered stases from <Stase>/Materi folders."""
+    return list(load_stase_roots(workspace_root))
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -175,10 +180,10 @@ def list_all_stases(
         conn.close()
 
     # Enrich dengan info folder
-    overrides = load_stase_overrides()
-    override_map = {e["slug"]: e for e in overrides.get("stases", [])}
+    discovered_map = {slug: materi_rel for slug, materi_rel in _workspace_discovered_stases(workspace_root)}
 
     enriched = []
+    seen_slugs = set()
     for row in rows:
         slug = row["slug"]
         dirname = stase_slug_to_dirname(slug)
@@ -188,6 +193,26 @@ def list_all_stases(
         entry["materi_dir"] = str(materi_dir)
         entry["materi_exists"] = materi_dir.is_dir()
         entry["is_builtin"] = slug in _BUILTIN_DIRNAMES
+        entry["is_discovered"] = slug in discovered_map
         enriched.append(entry)
+        seen_slugs.add(slug)
+
+    for slug, materi_rel in discovered_map.items():
+        if slug in seen_slugs:
+            continue
+        dirname = Path(materi_rel).parts[0]
+        materi_dir = workspace_root / materi_rel
+        enriched.append({
+            "id": None,
+            "slug": slug,
+            "display_name": dirname,
+            "csv_path": "",
+            "sort_order": 999999,
+            "dirname": dirname,
+            "materi_dir": str(materi_dir),
+            "materi_exists": materi_dir.is_dir(),
+            "is_builtin": slug in _BUILTIN_DIRNAMES,
+            "is_discovered": True,
+        })
 
     return enriched

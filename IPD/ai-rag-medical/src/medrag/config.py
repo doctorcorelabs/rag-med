@@ -25,6 +25,25 @@ STASE_MATERI_ROOTS: list[tuple[str, str]] = [
 # Glob pattern appended to each materi root to discover markdown pages
 MATERI_PAGE_GLOB = "**/pages/page-*/markdown.md"
 
+
+def _discover_workspace_stase_roots(workspace_root: Path) -> list[tuple[str, str]]:
+    """Discover local stase folders that follow the <Stase>/Materi layout."""
+    discovered: list[tuple[str, str]] = []
+    if not workspace_root.is_dir():
+        return discovered
+
+    for child in sorted(workspace_root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        materi_dir = child / "Materi"
+        if not materi_dir.is_dir():
+            continue
+        slug = child.name.strip().lower()
+        if not slug:
+            continue
+        discovered.append((slug, f"{child.name}/Materi"))
+    return discovered
+
 EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -40,13 +59,13 @@ ENABLE_EXHAUSTIVE_AUTO_MODE: bool = True
 STASE_OVERRIDES_PATH = PROJECT_ROOT / "stase_overrides.json"
 
 
-def load_stase_roots() -> list[tuple[str, str]]:
+def load_stase_roots(workspace_root: Path | None = None) -> list[tuple[str, str]]:
     """
     Gabungkan STASE_MATERI_ROOTS (hardcoded) + stase_overrides.json (dinamis dari UI).
     Return list of (slug, materi_dir_relative_to_workspace_root).
 
-    Digunakan oleh indexer.py agar stase baru otomatis ter-index
-    tanpa perlu mengubah kode Python.
+    Ditambah dengan discovery lokal berbasis folder <Stase>/Materi
+    agar stase baru yang dibuat manual langsung ikut ter-index.
     """
     import json as _json
 
@@ -60,4 +79,13 @@ def load_stase_roots() -> list[tuple[str, str]]:
                     base.append(pair)
         except Exception:
             pass
+
+    local_root = workspace_root or DEFAULT_WORKSPACE_ROOT
+    seen_slugs = {slug for slug, _ in base}
+    for slug, materi_dir in _discover_workspace_stase_roots(local_root):
+        if slug in seen_slugs:
+            continue
+        base.append((slug, materi_dir))
+        seen_slugs.add(slug)
+
     return base

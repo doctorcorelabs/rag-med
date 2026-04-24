@@ -9,6 +9,7 @@
   Contoh:
     powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1
     powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1 -RebuildIndex
+        powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1 -RebuildIndex -SkipVector
     powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1 -BackendOnly
 #>
 [CmdletBinding()]
@@ -18,7 +19,8 @@ param(
     [string]$PythonExe = "e:/Coas/.venv/Scripts/python.exe",
     [switch]$BackendOnly,
     [switch]$NoBrowser,
-    [switch]$RebuildIndex
+    [switch]$RebuildIndex,
+    [switch]$SkipVector
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,8 +81,14 @@ $pythonCmd = Resolve-PythonCommand -Preferred $PythonExe
 
 if ($RebuildIndex) {
     $buildScript = Join-Path $projectRoot "scripts\build_index.py"
-    Write-Host "[info] Rebuilding index (Chroma vector skipped for speed)..."
-    & $pythonCmd $buildScript @("--skip-vector")
+    if ($SkipVector) {
+        Write-Host "[info] Rebuilding index (vector skipped)..."
+        & $pythonCmd $buildScript @("--skip-vector")
+    }
+    else {
+        Write-Host "[info] Rebuilding index (full rebuild with vector)..."
+        & $pythonCmd $buildScript
+    }
     if (-not $?) {
         throw "build_index failed."
     }
